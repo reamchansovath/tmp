@@ -1781,18 +1781,66 @@ print("Column renaming and section colors defined")
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
 # Cell 5: Build Excel with Formatting Functions
 
-def _build_and_upload(nodes_df, edges_df, pairs_df, filename):
+def _build_xlsx_bytes(args):
+    """
+    Build the XLSX bytes for a single report. Pure CPU work -- safe to run
+    in a worker process. Returns (filename, bytes, ordered_nodes_df) so the
+    parent can upload + keep the ordered df for downstream diagnostics.
+    """
+    nodes_df, edges_df, pairs_df, filename = args
     buf = io.BytesIO()
     wb  = xlsxwriter.Workbook(buf, {'in_memory': True, 'nan_inf_to_errors': True})
     node_df_ordered = _write_sheet(wb, nodes_df,  'Customer Network Data', NODE_SECTIONS,  is_node=True)
     _write_sheet(wb, edges_df,  'Relationship Details',   EDGE_SECTIONS,  is_node=False)
     _write_sheet(wb, pairs_df,  'Buyer-Supplier Pairs',   PAIRS_SECTIONS, is_node=False)
     wb.close()
-    buf.seek(0)
-    Network_Graph_Report.upload_stream(filename, buf)
-    print(f"  Uploaded: {filename}")
+    return filename, buf.getvalue(), node_df_ordered
+
+def _build_and_upload(nodes_df, edges_df, pairs_df, filename):
+    """Sequential build + upload. Used as fallback when fork pool unavailable."""
+    fn, blob, node_df_ordered = _build_xlsx_bytes((nodes_df, edges_df, pairs_df, filename))
+    Network_Graph_Report.upload_stream(fn, io.BytesIO(blob))
+    print(f"  Uploaded: {fn}")
     print(f"    Nodes: {len(nodes_df):,}  |  Edges: {len(edges_df):,}  |  Pairs: {len(pairs_df):,}")
     return node_df_ordered
+
+def _build_and_upload_pair_parallel(jobs):
+    """
+    Build the XLSX bytes for both reports in parallel via a fork-based
+    multiprocessing pool, then upload sequentially from the main process
+    (Dataiku managed-folder writes must stay serial). Falls back to
+    sequential build on any failure.
+
+    `jobs` is a list of (nodes_df, edges_df, pairs_df, filename) tuples.
+    Returns dict {filename: ordered_nodes_df}.
+    """
+    import multiprocessing as mp
+    try:
+        ctx = mp.get_context("fork")
+    except (ValueError, AttributeError):
+        ctx = None
+
+    if ctx is None:
+        print("  fork context unavailable; building sequentially")
+        return {fn: _build_and_upload(nd, ed, pd_, fn) for nd, ed, pd_, fn in jobs}
+
+    try:
+        with ctx.Pool(processes=min(len(jobs), 2)) as pool:
+            results = pool.map(_build_xlsx_bytes, jobs)
+    except Exception as e:
+        print(f"  parallel build failed ({type(e).__name__}: {e}); falling back to sequential")
+        return {fn: _build_and_upload(nd, ed, pd_, fn) for nd, ed, pd_, fn in jobs}
+
+    ordered_by_name = {}
+    for fn, blob, ordered in results:
+        Network_Graph_Report.upload_stream(fn, io.BytesIO(blob))
+        nodes_df = next(j[0] for j in jobs if j[3] == fn)
+        edges_df = next(j[1] for j in jobs if j[3] == fn)
+        pairs_df = next(j[2] for j in jobs if j[3] == fn)
+        print(f"  Uploaded: {fn}")
+        print(f"    Nodes: {len(nodes_df):,}  |  Edges: {len(edges_df):,}  |  Pairs: {len(pairs_df):,}")
+        ordered_by_name[fn] = ordered
+    return ordered_by_name
 
 def _write_sheet(wb, df, sheet_name, sections, is_node=False):
     column_order  = []
@@ -2087,17 +2135,13 @@ print("\n" + "="*60)
 print("GENERATING EXCEL REPORTS")
 print("="*60)
 
-print("\nBuilding full report...")
-node_df_ordered_full = _build_and_upload(
-    nodes_full_final, edges_full_final, pairs_full_final,
-    'MEXT_SCREENER_full.xlsx'
-)
-
-print("\nBuilding filtered report...")
-node_df_ordered_filtered = _build_and_upload(
-    nodes_filtered_final, edges_filtered_final, pairs_filtered_final,
-    'MEXT_SCREENER_filtered.xlsx'
-)
+print("\nBuilding both reports in parallel (2-process fork pool)...")
+_ordered = _build_and_upload_pair_parallel([
+    (nodes_full_final,     edges_full_final,     pairs_full_final,     'MEXT_SCREENER_full.xlsx'),
+    (nodes_filtered_final, edges_filtered_final, pairs_filtered_final, 'MEXT_SCREENER_filtered.xlsx'),
+])
+node_df_ordered_full     = _ordered['MEXT_SCREENER_full.xlsx']
+node_df_ordered_filtered = _ordered['MEXT_SCREENER_filtered.xlsx']
 
 n_nodes_full     = len(nodes_full_final)
 n_nodes_filtered = len(nodes_filtered_final)

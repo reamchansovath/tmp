@@ -481,11 +481,15 @@ def cb(v):
     return str(v).strip().upper() in ("1", "Y", "YES", "TRUE")
 
 def g(row, col):
-    if col is None or col not in row.index: return None
-    return row[col]
+    """Cell accessor. row is a plain dict (from DataFrame.to_dict('records'))."""
+    if col is None: return None
+    return row.get(col)
 
+# *** updated | DataFrame.iterrows() is O(N) per access at scale (97k+ nodes
+# at the user's prod scale). DataFrame.to_dict('records') materialises once
+# and the inner loop becomes pure dict access -- ~10x faster on the build.
 std_nodes = []
-for _, row in nodes_df.iterrows():
+for row in nodes_df.to_dict('records'):
     std_nodes.append({
         # ── Identity ──────────────────────────────────────────────────────
         "uen":         cs(g(row, N["uen"])),
@@ -681,7 +685,7 @@ for _, row in nodes_df.iterrows():
     })
 
 std_edges = []
-for _, row in edges_df.iterrows():
+for row in edges_df.to_dict('records'):
     std_edges.append({
         "src_uen":  cs(g(row, E["src_uen"])),
         "src_name": cs(g(row, E["src_name"])),

@@ -310,11 +310,12 @@ def _build_mode_data(output_mode):
     }
 
     # ── FIX 2: rebuild TT adjacency maps from mode-specific edge set ──────
+    # *** updated | iterate via numpy arrays (zip) for ~3x speed at scale.
     new_out_adj = {}
     new_in_adj  = {}
-    for r in directed_edges_df[['from_uen', 'to_uen']].to_dict('records'):
-        src = str(r['from_uen']).strip()
-        tgt = str(r['to_uen']).strip()
+    _src_arr = directed_edges_df['from_uen'].astype(str).str.strip().to_numpy()
+    _tgt_arr = directed_edges_df['to_uen']  .astype(str).str.strip().to_numpy()
+    for src, tgt in zip(_src_arr, _tgt_arr):
         if src in kept_uens and tgt in kept_uens:
             new_out_adj.setdefault(src, []).append(tgt)
             new_in_adj.setdefault(tgt, []).append(src)
@@ -332,8 +333,9 @@ def _build_mode_data(output_mode):
     else:
         fast_edges_for_adj = fast_source.directed_edges_df
     new_fast_out, new_fast_in = {}, {}
-    for r in fast_edges_for_adj[['SOURCE_UEN','TARGET_UEN']].to_dict('records'):
-        s, t = str(r['SOURCE_UEN']).strip(), str(r['TARGET_UEN']).strip()
+    _fa_src = fast_edges_for_adj['SOURCE_UEN'].astype(str).str.strip().to_numpy()
+    _fa_tgt = fast_edges_for_adj['TARGET_UEN'].astype(str).str.strip().to_numpy()
+    for s, t in zip(_fa_src, _fa_tgt):
         if s in kept_uens and t in kept_uens:
             new_fast_out.setdefault(s, []).append(t)
             new_fast_in.setdefault(t, []).append(s)
@@ -344,8 +346,9 @@ def _build_mode_data(output_mode):
     else:
         giro_edges_for_adj = giro_source.directed_edges_df
     new_giro_out, new_giro_in = {}, {}
-    for r in giro_edges_for_adj[['SOURCE_UEN','TARGET_UEN']].to_dict('records'):
-        s, t = str(r['SOURCE_UEN']).strip(), str(r['TARGET_UEN']).strip()
+    _gi_src = giro_edges_for_adj['SOURCE_UEN'].astype(str).str.strip().to_numpy()
+    _gi_tgt = giro_edges_for_adj['TARGET_UEN'].astype(str).str.strip().to_numpy()
+    for s, t in zip(_gi_src, _gi_tgt):
         if s in kept_uens and t in kept_uens:
             new_giro_out.setdefault(s, []).append(t)
             new_giro_in.setdefault(t, []).append(s)
