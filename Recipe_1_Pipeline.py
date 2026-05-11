@@ -41,7 +41,7 @@ from network_graph.pipeline    import Enricher, Classifier
 from network_graph.pipeline    import RelationshipBuilder
 from network_graph.exporters   import DatasetExporter
 
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+from network_graph import INVALID_IDS as _INVALID_IDS  # canonical set lives on BaseSource
 
 # Per-direction Payment threshold: drop A->B if (TT + FAST + GIRO).ab < THRESHOLD_TXN_SGD
 THRESHOLD_TXN_SGD = 5_000   # SGD
@@ -432,16 +432,30 @@ def _build_directed_edges_df(tt_edges_input, label=''):
     for p in directed_map.values():
         ab_amt = p['ab_amt']
         ba_amt = p['ba_amt']
-        if ab_amt >= ba_amt:
+        # *** fix | tie-break by lexicographic UEN order so the canonical
+        # direction is stable across runs. Previously `>=` plus dict
+        # iteration order made `from_uen` non-deterministic when amounts
+        # were equal (PYTHONHASHSEED randomization could flip it).
+        if ab_amt > ba_amt:
             from_uen    = p['ref_src']; to_uen = p['ref_tgt']
             tt_ab_count = p['ab_count']; tt_ab_amt = ab_amt
             tt_ba_count = p['ba_count']; tt_ba_amt = ba_amt
             net_amt     = ab_amt - ba_amt
-        else:
+        elif ab_amt < ba_amt:
             from_uen    = p['ref_tgt']; to_uen = p['ref_src']
             tt_ab_count = p['ba_count']; tt_ab_amt = ba_amt
             tt_ba_count = p['ab_count']; tt_ba_amt = ab_amt
             net_amt     = ba_amt - ab_amt
+        else:
+            if str(p['ref_src']) <= str(p['ref_tgt']):
+                from_uen    = p['ref_src']; to_uen = p['ref_tgt']
+                tt_ab_count = p['ab_count']; tt_ab_amt = ab_amt
+                tt_ba_count = p['ba_count']; tt_ba_amt = ba_amt
+            else:
+                from_uen    = p['ref_tgt']; to_uen = p['ref_src']
+                tt_ab_count = p['ba_count']; tt_ab_amt = ba_amt
+                tt_ba_count = p['ab_count']; tt_ba_amt = ab_amt
+            net_amt = 0
 
         directed_rows.append({
             'from_uen'       : from_uen,
@@ -556,14 +570,23 @@ def _payment_directed_from_filter(payment_filtered):
             p['ba_count'] += count; p['ba_amt'] += amt
     rows = []
     for p in pairs.values():
-        if p['ab_amt'] >= p['ba_amt']:
+        # *** fix | deterministic tie-break (see _build_directed_edges_df)
+        if p['ab_amt'] > p['ba_amt']:
             from_uen, to_uen = p['ref_src'], p['ref_tgt']
             ab_c, ab_a, ba_c, ba_a = p['ab_count'], p['ab_amt'], p['ba_count'], p['ba_amt']
             net = ab_a - ba_a
-        else:
+        elif p['ab_amt'] < p['ba_amt']:
             from_uen, to_uen = p['ref_tgt'], p['ref_src']
             ab_c, ab_a, ba_c, ba_a = p['ba_count'], p['ba_amt'], p['ab_count'], p['ab_amt']
             net = ba_a - ab_a
+        else:
+            if str(p['ref_src']) <= str(p['ref_tgt']):
+                from_uen, to_uen = p['ref_src'], p['ref_tgt']
+                ab_c, ab_a, ba_c, ba_a = p['ab_count'], p['ab_amt'], p['ba_count'], p['ba_amt']
+            else:
+                from_uen, to_uen = p['ref_tgt'], p['ref_src']
+                ab_c, ab_a, ba_c, ba_a = p['ba_count'], p['ba_amt'], p['ab_count'], p['ab_amt']
+            net = 0
         rows.append({
             'from_uen'           : from_uen,
             'to_uen'             : to_uen,
@@ -817,12 +840,23 @@ print(f"GIRO summary:    {len(giro_summary):,}")
 print(f"Payment summary: {len(payment_summary):,}")
 print(f"All Txn summary: {len(all_txn_summary):,}")
 
-all_txn_latest_date = max(filter(None, [
+# *** fix | each source emits its latest date as a '%d %b %Y' string
+# (e.g. '09 Mar 2025'). `max()` on those strings does lexicographic
+# comparison: '09 Mar 2025' < '14 Mar 2024' because '0' < '1', so the
+# straightforward max returns the *older* year when days/months differ.
+# Parse to datetime, take max, format back.
+_dates_strs = [d for d in [
     consol_tt_source.tt_latest_date,
     fitas_source.fitas_latest_date,
     fast_source.fg_latest_date,
     giro_source.fg_latest_date,
-]), default=None)
+] if d]
+if _dates_strs:
+    _parsed = pd.to_datetime(_dates_strs, format='%d %b %Y', errors='coerce').dropna()
+    all_txn_latest_date = (_parsed.max().strftime('%d %b %Y')
+                           if len(_parsed) > 0 else None)
+else:
+    all_txn_latest_date = None
 
 # ── Filtered per-source summaries (for Recipe 2 'filtered' HTML side panel) ──
 # Each uses the same `_per_source_summary` helper but feeds in the threshold-
@@ -916,14 +950,23 @@ def _conn_range(src):
 fast_metric_ranges    = {'connections': _conn_range(fast_source)}
 giro_metric_ranges    = {'connections': _conn_range(giro_source)}
 
-# Payment combined degree map
+# Payment combined degree map.
+# *** fix | UNION of unique counterparties across TT + FAST + GIRO, not the
+# sum of per-source degrees. Summing double-counts any counterparty that
+# appears in more than one payment source (e.g. a partner that pays via
+# both TT and FAST), which inflates the node-sizing legend min/max.
+# Same union semantics as `_payment_nbrs[nid] = ts | fa | gi` later in the
+# file (where TT/FAST/GIRO are merged for the dataset's payment_degree_total).
 _payment_degree = {}
 for nid in (set(consol_tt_source.degree_map) | set(fast_source.degree_map) | set(giro_source.degree_map)):
-    _payment_degree[nid] = (
-        consol_tt_source.degree_map.get(nid, 0) +
-        fast_source.degree_map.get(nid, 0) +
-        giro_source.degree_map.get(nid, 0)
-    )
+    nbrs = set()
+    nbrs.update(consol_tt_source.out_adj.get(nid, []))
+    nbrs.update(consol_tt_source.in_adj.get(nid,  []))
+    nbrs.update(fast_source.out_adj.get(nid,      []))
+    nbrs.update(fast_source.in_adj.get(nid,       []))
+    nbrs.update(giro_source.out_adj.get(nid,      []))
+    nbrs.update(giro_source.in_adj.get(nid,       []))
+    _payment_degree[nid] = len(nbrs)
 payment_metric_ranges = {
     'connections': {'min': int(min(_payment_degree.values()) if _payment_degree else 0),
                     'max': int(max(_payment_degree.values()) if _payment_degree else 0)},
@@ -1228,16 +1271,27 @@ for i, nid in enumerate(all_uens):
     })
 
     # Self-transfer (per-UEN aggregate from each source's selfloop frame)
+    # *** fix | NaN-safe coercion: source dicts may carry numpy NaN for
+    # all-null groups; int(nan) / float(nan) propagate or crash. _z() => 0.
+    def _z(v):
+        if v is None:
+            return 0
+        try:
+            if pd.isna(v):
+                return 0
+        except (TypeError, ValueError):
+            pass
+        return v
     fst = _fast_self_lkp.get(nid)
     gst = _giro_self_lkp.get(nid)
-    row['fast_self_transfer_count'] = int(fst.get('_fast_count', 0)) if fst else 0
-    row['fast_self_transfer_amt']   = float(fst.get('_fast_amt',   0)) if fst else 0
-    row['giro_self_transfer_count'] = int(gst.get('_giro_count', 0)) if gst else 0
-    row['giro_self_transfer_amt']   = float(gst.get('_giro_amt',   0)) if gst else 0
+    row['fast_self_transfer_count'] = int(_z(fst.get('_fast_count', 0))) if fst else 0
+    row['fast_self_transfer_amt']   = float(_z(fst.get('_fast_amt',   0))) if fst else 0
+    row['giro_self_transfer_count'] = int(_z(gst.get('_giro_count', 0))) if gst else 0
+    row['giro_self_transfer_amt']   = float(_z(gst.get('_giro_amt',   0))) if gst else 0
     # tt_self_transfer_* sourced from selfloop_edges_df (TT-only legacy)
     tt_self_row = _tt_self_lkp.get(nid)
-    row['tt_self_transfer_count'] = int(tt_self_row.get('_tt_count', 0)) if tt_self_row else 0
-    row['tt_self_transfer_amt']   = float(tt_self_row.get('_tt_amt',   0)) if tt_self_row else 0
+    row['tt_self_transfer_count'] = int(_z(tt_self_row.get('_tt_count', 0))) if tt_self_row else 0
+    row['tt_self_transfer_amt']   = float(_z(tt_self_row.get('_tt_amt',   0))) if tt_self_row else 0
     row['payment_self_transfer_count'] = (
         row['tt_self_transfer_count'] + row['fast_self_transfer_count'] + row['giro_self_transfer_count']
     )
@@ -1374,13 +1428,13 @@ print(f"  Directed pairs (filtered):      {len(directed_edges_df_filtered):,}")
 print(f"  TT self-loops (full):           {len(selfloop_edges_df):,}")
 print(f"  TT self-loops (filtered):       {len(selfloop_edges_df_filtered):,}")
 print(f"  Buyer-Supplier pairs:           {len(relationship_df):,}")
-print(f"  Payment threshold (per direction, TT+MEPS+FAST+GIRO combined): S${THRESHOLD_TXN_SGD:,}")
+print(f"  Payment threshold (per direction, TT+FAST+GIRO combined): S${THRESHOLD_TXN_SGD:,}")
 
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
 # Cell 14b: Validation -- threshold-rescue sample pairs
 
 print("\n" + "="*60)
-print("VALIDATION: pairs lifted past S$5,000 threshold by FAST+GIRO")
+print(f"VALIDATION: pairs lifted past S${THRESHOLD_TXN_SGD:,} threshold by FAST+GIRO")
 print("="*60)
 
 _v1 = payment_df[

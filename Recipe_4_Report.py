@@ -790,7 +790,7 @@ HTML = f"""<!DOCTYPE html>
   -webkit-print-color-adjust:exact;
 }}
 :root{{
-  --gold:#FFCF01;--gold-pale:#FFFAE6;--gold-mid:#FFE55A;
+  --gold:#FBBA00;--gold-pale:#FFFAE6;--gold-mid:#FDD24E;
   --black:#111111;--charcoal:#222222;--grey-label:#3D3D3D;
   --grey-dark:#505050;--grey-mid:#888888;--grey-row:#F4F4F4;
   --grey-border:#D4D4D4;--white:#FFFFFF;--green:#1A6B3E;
@@ -805,7 +805,7 @@ body{{font-family:var(--font);background:#EFEFEF;color:var(--black);min-height:1
 .brand-tag{{font-size:10.5px;color:#9A9A9A;margin-bottom:44px;letter-spacing:1px;text-transform:uppercase;}}
 .sbw{{width:100%;max-width:600px;position:relative;}}
 .sbw input{{width:100%;padding:16px 52px 16px 20px;font-family:var(--font);font-size:15px;font-weight:500;background:#161616;border:1.5px solid #252525;border-radius:4px;color:var(--white);outline:none;transition:border-color 0.2s;}}
-.sbw input:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(255,207,1,0.08);}}
+.sbw input:focus{{border-color:var(--gold);box-shadow:0 0 0 3px rgba(251,186,0,0.08);}}
 .sbw input::placeholder{{color:#7A7A7A;}}
 .sbw-icon{{position:absolute;right:18px;top:50%;transform:translateY(-50%);color:#9A9A9A;pointer-events:none;}}
 #sug{{position:absolute;top:calc(100% + 5px);left:0;right:0;background:#141414;border:1px solid #252525;border-radius:4px;z-index:100;overflow:hidden;display:none;max-height:340px;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.5);}}
@@ -1147,7 +1147,10 @@ function gen(uen) {{
   const [fastSG,    fastMY   ] = countryBreakdown(uen, 'FAST');
   const [giroSG,    giroMY   ] = countryBreakdown(uen, 'GIRO');
   const [paySG,     payMY    ] = countryBreakdown(uen, ['Consolidated_TT','FAST','GIRO']);
-  const [allSGreal, allMYreal] = countryBreakdown(uen, null);   // every source
+  // All Transactions = FITAS + Payment (TT/FAST/GIRO). Excludes RSME and AA Paper.
+  const [allTxSG,   allTxMY  ] = countryBreakdown(uen, ['Consolidated_TT','FAST','GIRO','FITAS']);
+  // Every source (RSME + AA + Payment + FITAS) -- used for the "All Networks (Combined)" row only.
+  const [allSGreal, allMYreal] = countryBreakdown(uen, null);
 
   // ── TT counterparties ─────────────────────────────────────────────────
   const ttMap = {{}};
@@ -1571,7 +1574,7 @@ function gen(uen) {{
         ['FAST',                        fnum(node.fast_deg),  fastSG,    fastMY,    'FAST payment counterparties'],
         ['GIRO',                        fnum(node.giro_deg),  giroSG,    giroMY,    'GIRO payment counterparties'],
         ['Payment Transactions (TT/MEPS/FAST/GIRO)', fnum(node.pay_deg), paySG, payMY, 'TT + MEPS + FAST + GIRO union'],
-        ['All Transactions (FITAS + TT/MEPS/FAST/GIRO)', fnum(node.all_deg), allSGreal, allMYreal, 'FITAS + TT + MEPS + FAST + GIRO union'],
+        ['All Transactions (FITAS + TT/MEPS/FAST/GIRO)', fnum(node.all_deg), allTxSG, allTxMY, 'FITAS + TT + MEPS + FAST + GIRO union'],
       ]
     )}}
     <div class="ssl">Buyer / Supplier Breakdown</div>

@@ -10,14 +10,14 @@ if os.getenv('DATAIKU_ENV') == 'local':
 
 
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: MARKDOWN
-# | What to change                | Where                                    | Cell   |
-# |-------------------------------|------------------------------------------|--------|
-# | TT edge filter threshold      | `TT_EDGE_MIN_AMT`                        | Cell 1 |
-# | Column order in Excel         | `NODE_SECTIONS` or `EDGE_SECTIONS`       | Cell 4 |
-# | Which columns to include      | `NODE_COLS_TO_KEEP` or `EDGE_COLS_TO_KEEP` | Cell 3 |
-# | Column display names          | `NODE_RENAME` or `EDGE_RENAME`           | Cell 4 |
-# | Section colors                | `NODE_SECTIONS` or `EDGE_SECTIONS`       | Cell 4 |
-# | Buyer-Supplier pairs columns  | `PAIRS_RENAME` or `PAIRS_SECTIONS`       | Cell 4 |
+# | What to change                       | Where                                       | Cell   |
+# |--------------------------------------|---------------------------------------------|--------|
+# | Payment threshold (per-direction)    | `THRESHOLD_TXN_SGD`                         | Cell 1 |
+# | Column order in Excel                | `NODE_SECTIONS` or `EDGE_SECTIONS`          | Cell 4 |
+# | Which columns to include             | `NODE_COLS_TO_KEEP` or `EDGE_COLS_TO_KEEP`  | Cell 3 |
+# | Column display names                 | `NODE_RENAME` or `EDGE_RENAME`              | Cell 4 |
+# | Section colors                       | `NODE_SECTIONS` or `EDGE_SECTIONS`          | Cell 4 |
+# | Buyer-Supplier pairs columns         | `PAIRS_RENAME` or `PAIRS_SECTIONS`          | Cell 4 |
 
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
 # Recipe 3
@@ -32,6 +32,7 @@ import io
 import math
 import pickle
 from pathlib import Path
+from network_graph.config import NetworkGraphConfig  # *** new | Tier 1 single-source-of-truth for Excel labels
 
 THRESHOLD_TXN_SGD = 5_000   # SGD -- per-direction Payment combined (TT+FAST+GIRO)
 TT_EDGE_MIN_AMT   = THRESHOLD_TXN_SGD  # legacy alias retained for any in-cell references
@@ -74,7 +75,10 @@ AMT_COLS = {
     'FIN_SALES_CY', 'FIN_PROF_BEF_TAX_CY', 'FIN_CASH_BANK_BAL_CY',
     'FIN_TRADE_CRED_CY', 'FIN_TRADE_DEPT_CY',
     'tt_ord_amt', 'tt_bene_amt', 'tt_net_flow_amt', 'tt_self_transfer_amt',
-    'fitas_ord_amt', 'fitas_bene_amt', 'fitas_total_amt',
+    # *** fix | added fitas_net_flow_amt -- Recipe 1 produces it (line ~780)
+    # but it was missing from the keep list, so Recipe 4 Section E
+    # "FITAS Net Flow (SGD)" rendered blank.
+    'fitas_ord_amt', 'fitas_bene_amt', 'fitas_net_flow_amt', 'fitas_total_amt',
     # FAST
     'fast_ord_amt', 'fast_bene_amt', 'fast_net_flow_amt', 'fast_self_transfer_amt', 'fast_total_amt',
     # GIRO
@@ -180,104 +184,44 @@ DATE_COLS = {
     'EARLIEST_CLOSED_AC_OPN_DTE', 'LATEST_AC_CLS_DTE',
 }
 
-def clean_postal(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    s = str(val).strip().split('.')[0]
-    return s.zfill(6) if s and s not in ('nan','None','') else None
-
-def clean_ssic(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    s = str(val).strip().split('.')[0]
-    if not s or s in ('nan','None',''): return None
-    return s.zfill(5) if s.isdigit() else s
-
-def clean_amt(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    try:    return int(round(float(val)))
-    except: return None
-
-def clean_int(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    try:    return int(val)
-    except: return None
-
-def clean_ratio(val):
-    """For MFI ratio cols (DCSR, Gearing) -- plain decimal rounded to 2dp."""
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    try:    return round(float(val), 2)
-    except: return None
-
-def clean_flag(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return 0
-    if isinstance(val, bool): return int(val)
-    if isinstance(val, (int, float)): return 1 if val else 0
-    return 1 if str(val).strip().upper() in ('1','Y','YES','TRUE') else 0
-
-def clean_date(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    try:
-        if pd.isna(val): return None
-    except (TypeError, ValueError):
-        pass
-    if hasattr(val, 'strftime'):
-        if hasattr(val, 'tzinfo') and val.tzinfo is not None:
-            val = val.replace(tzinfo=None)
-        return val.strftime('%d %b %Y')
-    s = str(val).strip()
-    if not s or s in ('nan', 'None', 'NaT', ''): return None
-    if ':' in s and len(s) > 9:
-        date_part = s.split(':')[0].strip()
-        try:    return pd.to_datetime(date_part.title(), format='%d%b%Y').strftime('%d %b %Y')
-        except: pass
-    if 'T' in s:
-        try:    return pd.to_datetime(s).strftime('%d %b %Y')
-        except: pass
-    if len(s) == 9 and s[2:5].isalpha():
-        try:    return pd.to_datetime(s.title(), format='%d%b%Y').strftime('%d %b %Y')
-        except: pass
-    if '/' in s:
-        try:    return pd.to_datetime(s, format='%d/%m/%Y').strftime('%d %b %Y')
-        except: pass
-    if '-' in s:
-        try:    return pd.to_datetime(s).strftime('%d %b %Y')
-        except: pass
-    try:    return pd.to_datetime(s).strftime('%d %b %Y')
-    except: return s
-
-def clean_string(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    s = str(val).strip()
-    return s if s and s not in ('nan','None','NaT') else None
-
-def clean_year(val):
-    if val is None or (isinstance(val, float) and math.isnan(val)): return None
-    try:    return str(int(float(val)))
-    except: return None
+# *** refactor | All cleaners live on Enricher (single source of truth).
+# Recipe 3's local copies were near-duplicates that drifted (Enricher
+# checks pd.NA more robustly; Recipe 3 had timezone/title-case handling
+# in clean_date that Enricher lacked). Both are now merged on Enricher.
+from network_graph.pipeline.enricher import Enricher as _E
+clean_postal = _E.clean_postal
+clean_ssic   = _E.clean_ssic
+clean_amt    = _E.clean_amt
+clean_int    = _E.clean_int
+clean_ratio  = _E.clean_ratio
+clean_flag   = _E.clean_flag
+clean_date   = _E.clean_date
+clean_string = _E.clean_string
+clean_year   = _E.clean_year
 
 def apply_cleaning(df):
     df_clean = df.copy()
+    # type -> cleaner mapping; first-match wins. col-specific overrides come last.
+    type_cleaners = [
+        (AMT_COLS,    clean_amt),
+        (RATIO_COLS,  clean_ratio),
+        (INT_COLS,    clean_int),
+        (FLAG_COLS,   clean_flag),
+        (DATE_COLS,   clean_date),
+        (STRING_COLS, clean_string),
+    ]
+    col_specific = {
+        'postal_code'      : clean_postal,
+        'SSIC_CODE'        : clean_ssic,
+        'EMIS Fiscal Year' : clean_year,
+        'CIF_NO'           : clean_string,
+    }
     for col in df_clean.columns:
-        if col in AMT_COLS:
-            df_clean[col] = df_clean[col].apply(clean_amt)
-        elif col in RATIO_COLS:
-            # *** new | MFI ratio cols -- plain float, not rounded to int
-            df_clean[col] = df_clean[col].apply(clean_ratio)
-        elif col in INT_COLS:
-            df_clean[col] = df_clean[col].apply(clean_int)
-        elif col in FLAG_COLS:
-            df_clean[col] = df_clean[col].apply(clean_flag)
-        elif col in DATE_COLS:
-            df_clean[col] = df_clean[col].apply(clean_date)
-        elif col in STRING_COLS:
-            df_clean[col] = df_clean[col].apply(clean_string)
-        elif col == 'postal_code':
-            df_clean[col] = df_clean[col].apply(clean_postal)
-        elif col == 'SSIC_CODE':
-            df_clean[col] = df_clean[col].apply(clean_ssic)
-        elif col == 'EMIS Fiscal Year':
-            df_clean[col] = df_clean[col].apply(clean_year)
-        elif col == 'CIF_NO':
-            df_clean[col] = df_clean[col].apply(clean_string)
+        cleaner = next((fn for type_set, fn in type_cleaners if col in type_set), None)
+        if cleaner is None:
+            cleaner = col_specific.get(col)
+        if cleaner is not None:
+            df_clean[col] = df_clean[col].apply(cleaner)
     return df_clean
 
 print("Data cleaning functions defined")
@@ -286,7 +230,7 @@ print("Data cleaning functions defined")
 # Cell 3: Enrich Edges, Apply Edge-Level Filter, Configure Column Selection
 # *** updated | added MFI_COLS_IN_NODE and CIP_COLS_IN_NODE to NODE_COLS_TO_KEEP
 
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+from network_graph import INVALID_IDS as _INVALID_IDS  # canonical set lives on BaseSource
 
 NetworkGraph_Node_Info_df['fitas_total_amt'] = (
     NetworkGraph_Node_Info_df['fitas_ord_amt'].fillna(0) +
@@ -429,6 +373,11 @@ print(f"\n  Full nodes (with edges only): {len(nodes_full):,}  "
 # Payment per-direction threshold: aggregate (src,tgt) across {Consolidated_TT, FAST, GIRO}
 # and drop rows whose pair's combined Payment ab amount < THRESHOLD_TXN_SGD.
 _PAYMENT_SOURCES = {'Consolidated_TT', 'FAST', 'GIRO'}
+# *** fix | All Txn = FITAS + Payment (4 sources). Excludes RSME and AA Paper.
+# Previously the 'all_txn' branch used every non-self edge, which produced
+# a 6-source union (== total_degree_total) and mismatched the column label
+# "All Txn ... (FITAS + TT/MEPS/FAST/GIRO)" plus Recipe 4 Section E.
+_ALL_TXN_SOURCES = {'Consolidated_TT', 'FAST', 'GIRO', 'FITAS'}
 payment_mask = edges_enriched['edge_source'].isin(_PAYMENT_SOURCES)
 non_payment_mask = ~payment_mask
 
@@ -479,7 +428,7 @@ orphans_removed  = len(nodes_full) - len(nodes_filtered)
 print("\n" + "="*60)
 print("EDGE-LEVEL FILTER SUMMARY")
 print("="*60)
-print(f"  Payment threshold filter: drop a row if its (SOURCE,TARGET) per-direction Payment combined amount < S${TT_EDGE_MIN_AMT:,}")
+print(f"  Payment threshold filter: drop a row if its (SOURCE,TARGET) per-direction Payment combined amount < S${THRESHOLD_TXN_SGD:,}")
 print(f"\n  TT edges before filter:   {tt_edges_before:,}")
 print(f"  TT edges removed:         {tt_edges_removed:,}  ({tt_edges_removed/max(tt_edges_before,1)*100:.1f}%)")
 print(f"  TT edges kept:            {tt_edges_before - tt_edges_removed:,}")
@@ -580,8 +529,10 @@ def _per_source_recompute(label, edge_source_value, prefix):
         slf = edges_filtered[edges_filtered['edge_source'].isin(_PAYMENT_SOURCES) &
                              edges_filtered['self_transfer'].astype(bool)].copy()
     elif edge_source_value is None and prefix == 'all_txn':
-        ext = edges_filtered[~edges_filtered['self_transfer'].astype(bool)].copy()
-        slf = edges_filtered[ edges_filtered['self_transfer'].astype(bool)].copy()
+        ext = edges_filtered[edges_filtered['edge_source'].isin(_ALL_TXN_SOURCES) &
+                             ~edges_filtered['self_transfer'].astype(bool)].copy()
+        slf = edges_filtered[edges_filtered['edge_source'].isin(_ALL_TXN_SOURCES) &
+                              edges_filtered['self_transfer'].astype(bool)].copy()
     else:
         ext = edges_filtered[(edges_filtered['edge_source'] == edge_source_value) &
                              ~edges_filtered['self_transfer'].astype(bool)].copy()
@@ -610,13 +561,26 @@ def _per_source_recompute(label, edge_source_value, prefix):
                     .agg(_cnt=('txn_count','sum'), _amt=('txn_amt','sum'))
                     .to_dict('index'))
 
+    # *** fix | NaN-safe coercion: pandas groupby().sum() on an all-NaN
+    # group returns NaN (not 0). `nan or 0` returns nan (truthy), and
+    # int(nan) crashes with ValueError. Use _z(v) -> 0 for NaN/None.
+    def _z(v):
+        if v is None:
+            return 0
+        try:
+            if pd.isna(v):
+                return 0
+        except (TypeError, ValueError):
+            pass
+        return v
+
     rows = []
     for nid in nodes_filtered['UEN'].astype(str).tolist():
         n  = nbrs.get(nid, set())
         sent_i = sent_grp.get(nid, {'_freq': 0, '_amt': 0})
         recv_i = recv_grp.get(nid, {'_freq': 0, '_amt': 0})
-        ord_amt  = sent_i['_amt']  or 0
-        bene_amt = recv_i['_amt']  or 0
+        ord_amt  = _z(sent_i['_amt'])
+        bene_amt = _z(recv_i['_amt'])
         si       = self_dict.get(nid, {})
         rows.append({
             'UEN': nid,
@@ -624,13 +588,13 @@ def _per_source_recompute(label, edge_source_value, prefix):
             f'{prefix}_degree_non_trade_mb': sum(1 for nb in n if cust_type_lookup.get(nb, NON_MB) == NON_TRADE),
             f'{prefix}_degree_non_mb'      : sum(1 for nb in n if cust_type_lookup.get(nb, NON_MB) == NON_MB),
             f'{prefix}_degree_total'       : len(n),
-            f'{prefix}_ord_freq'           : int(sent_i['_freq'] or 0),
+            f'{prefix}_ord_freq'           : int(_z(sent_i['_freq'])),
             f'{prefix}_ord_amt'            : ord_amt,
-            f'{prefix}_bene_freq'          : int(recv_i['_freq'] or 0),
+            f'{prefix}_bene_freq'          : int(_z(recv_i['_freq'])),
             f'{prefix}_bene_amt'           : bene_amt,
             f'{prefix}_net_flow_amt'       : ord_amt - bene_amt,
-            f'{prefix}_self_transfer_count': int(si.get('_cnt', 0)),
-            f'{prefix}_self_transfer_amt'  : si.get('_amt', 0),
+            f'{prefix}_self_transfer_count': int(_z(si.get('_cnt', 0))),
+            f'{prefix}_self_transfer_amt'  : _z(si.get('_amt', 0)),
         })
     df_re = pd.DataFrame(rows)
     rename = {c: f'_{c}_new' for c in df_re.columns if c != 'UEN'}
@@ -856,6 +820,7 @@ NODE_COLS_TO_KEEP = [
     'fitas_degree_trade_mb', 'fitas_degree_non_trade_mb', 'fitas_degree_non_mb',
     'fitas_degree_total',
     'fitas_ord_freq', 'fitas_ord_amt', 'fitas_bene_freq', 'fitas_bene_amt',
+    'fitas_net_flow_amt',  # *** fix | added so Recipe 4 Section E can render it
     'fitas_yr',  # extra -- collapsed
     'fitas_total_amt',  # summary
 
@@ -1094,7 +1059,11 @@ def _build_pairs_df(rel_df, connected_uens, label):
                 else None
             )
 
-    for flag_col in ['is_both', 'is_directed', 'in_fitas', 'in_aa', 'in_tt', 'in_rsme']:
+    # *** fix | added in_fast/in_giro/in_payment so all source-presence
+    # flags get coerced to 1/0 in Excel (previously these three retained
+    # raw True/False/None which Excel renders inconsistently).
+    for flag_col in ['is_both', 'is_directed', 'in_fitas', 'in_aa', 'in_tt',
+                     'in_rsme', 'in_fast', 'in_giro', 'in_payment']:
         if flag_col in df.columns:
             df[flag_col] = df[flag_col].apply(clean_flag)
 
@@ -1208,209 +1177,131 @@ pairs_full_df.head(3)
 # *** updated | trade facility columns prefixed with "Trade" in Excel display names
 # *** updated | added 4 new CIP open/close date col renames and section entries
 
-NODE_RENAME = {
-    'node_source': 'Data Source',
-    'source_rsme': 'In RSME Network', 'source_tt': 'In TT Network',
-    'source_fitas': 'In FITAS Network', 'source_aa_paper': 'In AA Paper Network',
-    'CUST_TYPE': 'Customer Type', 'source_name': 'Company Name',
-    'UEN': 'UEN', 'CIF_NO': 'CIF Number', 'CIF_GROUP_NAME': 'Parent Group',
-    'FINAL_CLASSIFICATION': 'Customer Segment', 'IS_MAYBANK_CUSTOMER': 'Is Maybank Customer',
-    'source_country': 'Country',
-    'total_degree_trade_mb': 'Total Connections - Trade Customers',
-    'total_degree_non_trade_mb': 'Total Connections - Non-Trade Customers',
-    'total_degree_non_mb': 'Total Connections - Non-Maybank',
-    'total_degree_total': 'Total Connections (All Networks)',
-    'total_degree_trade_mb_pct': 'Total Connections - Trade %',
+# *** refactor (Tier 1) | NODE_RENAME is now built from
+# NetworkGraphConfig.get_excel_rename() (single source of truth in config.py
+# for every FIELD_CONFIG-derived column header) plus the per-source flow
+# metric labels below. To rename a FIELD_CONFIG column for Excel, edit
+# NetworkGraphConfig.EXCEL_LABEL_OVERRIDES; falls back to FIELD_CONFIG[k]['label']
+# when not overridden.
+_FIELD_CONFIG_RENAME = NetworkGraphConfig.get_excel_rename()
+
+# Per-source flow metrics + identity columns NOT in FIELD_CONFIG (they are
+# computed from edges in Recipe 1 / Recipe 3 rather than enriched from a
+# reference table). These stay in Recipe 3 as the recipe-specific portion.
+_FLOW_METRIC_RENAME = {
+    # ── identity / source flags ─────────────────────────────────────────
+    'node_source'                  : 'Data Source',
+    'source_rsme'                  : 'In RSME Network',
+    'source_tt'                    : 'In TT Network',
+    'source_fitas'                 : 'In FITAS Network',
+    'source_aa_paper'              : 'In AA Paper Network',
+    'source_fast'                  : 'In FAST Network',
+    'source_giro'                  : 'In GIRO Network',
+    'CUST_TYPE'                    : 'Customer Type',
+    'source_name'                  : 'Company Name',
+    'UEN'                          : 'UEN',
+    'CIF_NO'                       : 'CIF Number',
+    # ── total/aggregate connection counts ───────────────────────────────
+    'total_degree_trade_mb'        : 'Total Connections - Trade Customers',
+    'total_degree_non_trade_mb'    : 'Total Connections - Non-Trade Customers',
+    'total_degree_non_mb'          : 'Total Connections - Non-Maybank',
+    'total_degree_total'           : 'Total Connections (All Networks)',
+    'total_degree_trade_mb_pct'    : 'Total Connections - Trade %',
     'total_degree_non_trade_mb_pct': 'Total Connections - Non-Trade %',
-    'total_degree_non_mb_pct': 'Total Connections - Non-Maybank %',
-    'total_degree_sg': 'Total Connections - SG', 'total_degree_my': 'Total Connections - MY',
+    'total_degree_non_mb_pct'      : 'Total Connections - Non-Maybank %',
+    'total_degree_sg'              : 'Total Connections - SG',
+    'total_degree_my'              : 'Total Connections - MY',
     'total_connections_to_buyers'           : 'Total Connections to Buyers',
     'total_connections_to_suppliers'        : 'Total Connections to Suppliers',
     'total_connections_to_maybank_buyers'   : 'Total Connections to Maybank Customer Buyers',
     'total_connections_to_maybank_suppliers': 'Total Connections to Maybank Customer Suppliers',
-    'rsme_degree_trade_mb': 'RSME Connections - Trade Customers',
-    'rsme_degree_non_trade_mb': 'RSME Connections - Non-Trade Customers',
-    'rsme_degree_non_mb': 'RSME Connections - Non-Maybank', 'rsme_degree_total': 'RSME Total Connections',
-    'tt_degree_trade_mb': 'TT Connections - Trade Customers',
-    'tt_degree_non_trade_mb': 'TT Connections - Non-Trade Customers',
-    'tt_degree_non_mb': 'TT Connections - Non-Maybank', 'tt_degree_total': 'TT Total Connections',
-    'tt_degree_sg': 'TT Connections - SG', 'tt_degree_my': 'TT Connections - MY',
-    'fitas_degree_trade_mb': 'FITAS Connections - Trade Customers',
+    # ── per-source degree counts ────────────────────────────────────────
+    'rsme_degree_trade_mb'     : 'RSME Connections - Trade Customers',
+    'rsme_degree_non_trade_mb' : 'RSME Connections - Non-Trade Customers',
+    'rsme_degree_non_mb'       : 'RSME Connections - Non-Maybank',
+    'rsme_degree_total'        : 'RSME Total Connections',
+    'tt_degree_trade_mb'       : 'TT Connections - Trade Customers',
+    'tt_degree_non_trade_mb'   : 'TT Connections - Non-Trade Customers',
+    'tt_degree_non_mb'         : 'TT Connections - Non-Maybank',
+    'tt_degree_total'          : 'TT Total Connections',
+    'tt_degree_sg'             : 'TT Connections - SG',
+    'tt_degree_my'             : 'TT Connections - MY',
+    'fitas_degree_trade_mb'    : 'FITAS Connections - Trade Customers',
     'fitas_degree_non_trade_mb': 'FITAS Connections - Non-Trade Customers',
-    'fitas_degree_non_mb': 'FITAS Connections - Non-Maybank', 'fitas_degree_total': 'FITAS Total Connections',
-    'aa_degree_trade_mb': 'AA Paper Connections - Trade Customers',
-    'aa_degree_non_trade_mb': 'AA Paper Connections - Non-Trade Customers',
-    'aa_degree_non_mb': 'AA Paper Connections - Non-Maybank', 'aa_degree_total': 'AA Paper Total Connections',
-    'tt_ord_freq': 'TT Transactions Sent (Count)', 'tt_ord_amt': 'TT Amount Sent (SGD)',
-    'tt_bene_freq': 'TT Transactions Received (Count)', 'tt_bene_amt': 'TT Amount Received (SGD)',
-    'tt_net_flow_amt': 'TT Net Flow (SGD)',
-    'tt_self_transfer_count': 'TT Self-Transfer (Count)', 'tt_self_transfer_amt': 'TT Self-Transfer Amount (SGD)',
-    'fitas_ord_freq': 'FITAS Transactions Sent (Count)', 'fitas_ord_amt': 'FITAS Amount Sent (SGD)',
-    'fitas_bene_freq': 'FITAS Transactions Received (Count)', 'fitas_bene_amt': 'FITAS Amount Received (SGD)',
-    'fitas_total_amt': 'FITAS Total Amount (SGD)',
-    'entity_type_description': 'Entity Type', 'entity_status_description': 'Entity Status',
-    'FIRST_CA_OPN_DTE': 'First CA Opening Date', 'RLTNSHP_TENURE': 'Relationship Tenure (Days)',
-    'postal_code': 'Postal Code', 'SSIC_CODE': 'SSIC Code',
-    'MAS610_INDST_DESC': 'Sector', 'BIZ_TYP_DESC': 'Industry',
-    'EMIS City'                : 'City',
-    'EMIS Number of Employees' : 'No. Employees',
-    'EMIS Listed / Unlisted'   : 'Listed / Unlisted',
-    'EMIS Export'              : 'Export Countries',
-    'EMIS Incorporation Date'  : 'Incorporation Date',
-    'EMIS Business Description': 'Business Description',
-    # *** updated | trade facility columns -- "Trade" prefix added
-    'TF_LCY_AVAIL_LMT'      : 'Trade Available Limit (SGD)',
-    'TF_LCY_AUTH_LMT'       : 'Trade Authorised Limit (SGD)',
-    'ADT_CREATION_DATE'     : 'Latest AA Creation Date',
-    'TF_LCY_TOT_OS'         : 'Trade On-Balance Sheet Outstanding (SGD)',
-    'TF_LCY_OBS_OS'         : 'Trade Off-Balance Sheet Outstanding (SGD)',
-    'TF_LCY_OUTSTANDING'    : 'Trade Outstanding Balance (SGD)',
-    'TF_LCY_UTILISATION_PCT': 'Trade Utilisation (%)',
-    'CASA': 'Current Account (SGD)', 'FD': 'TD (SGD)', 'STRCTD': 'Structured TD (SGD)',
-    'DEP_BALANCES': 'Total Deposit Balances (SGD)', 'TR_LN': 'Trade Loan (SGD)',
-    'NONTR_LN': 'Non-Trade Loan (SGD)', 'LN_BALANCES': 'Total Loan Balances (SGD)',
-    'credit_status': 'Credit Status', 'impairment_stage': 'Impairment Stage', 'RISK_GRADE': 'Risk Grade',
-    'is_watchlist': 'Is Watchlist', 'is_special_mention': 'Is Special Mention (SMA)', 'is_npl': 'Is NPL',
-    'months_on_book': 'Months on Book', 'borrower_risk_rating': 'Borrower Risk Rating (BRR)',
-    'rating_date': 'Rating Date', 'latest_dpd_bucket': 'Latest DPD Bucket',
-    'delinquency_count_12m': 'Delinquency Count (12M)',
-    'FIN_FIN_YR_END_CY': 'ACRA Financial Year End', 'FIN_SALES_CY': 'ACRA Sales Revenue (SGD)',
-    'FIN_PROF_BEF_TAX_CY': 'ACRA Profit Before Tax (SGD)', 'FIN_CASH_BANK_BAL_CY': 'ACRA Cash & Bank Balance (SGD)',
-    'FIN_TRADE_CRED_CY': 'ACRA Trade Creditors (SGD)', 'FIN_TRADE_DEPT_CY': 'ACRA Trade Debtors (SGD)',
-    'N_CHARGES'                    : 'Charge Count',
-    'N_UNIQUE_CHARGEE'             : 'Unique Chargee Count',
-    'EARLIEST_CHARGE_REG_DATE'     : 'Earliest Charge Reg Date',
-    'LATEST_CHARGE_REG_DATE'       : 'Latest Charge Reg Date',
-    'CHARGE_SECURED_AMOUNT_SGD'    : 'Charge Secured Amount (SGD)',
-    'CHARGE_ALLMONIESOWING_Y_COUNT': 'Charges - All Monies Owing (Y Count)',
-    'CHARGE_ALLMONIESOWING_N_COUNT': 'Charges - All Monies Owing (N Count)',
-    'EMIS Country': 'EMIS Country', 'EMIS Company Name': 'EMIS Company Name',
-    'EMIS Industry': 'EMIS Industry', 'EMIS Key Executives': 'EMIS Key Executives',
-    'EMIS Total Operating Revenue (USD)'      : 'Total Operating Revenue (USD)',
-    'EMIS Operating Profit (USD)'             : 'Operating Profit (USD)',
-    'EMIS Profit Before Income Tax (USD)'     : 'Profit Before Income Tax (USD)',
-    'EMIS Total Assets (USD)'                 : 'Total Assets (USD)',
-    'EMIS Free Cash Flow (USD)'               : 'Free Cash Flow (USD)',
-    'EMIS Net Cash Flow from Operations (USD)': 'Net Cash Flow from Operations (USD)',
-    'EMIS Return on Assets / ROA (%)': 'EMIS ROA (%)', 'EMIS Return on Equity / ROE (%)': 'EMIS ROE (%)',
-    'EMIS Company ID': 'EMIS Company ID', 'EMIS Fiscal Year': 'EMIS Fiscal Year',
-    'EMIS Audited': 'EMIS Audited', 'EMIS Source': 'EMIS Source',
-    # MFI column renames
-    'MFI_END_DTE'              : 'MFI Financial Year End',
-    'MFI_STATEMENT_TYP'        : 'MFI Statement Type',
-    'MFI_AUDITOR_NAME'         : 'MFI Auditor',
-    'MFI_QUALIFIED'            : 'MFI Qualified Opinion',
-    'MFI_SEG_DESC'             : 'MFI Segment',
-    'MFI_MODEL_NAME'           : 'MFI Model Name',
-    'MFI_TARGET_CURCY_CODE'    : 'MFI Target Currency',
-    'MFI_BASE_CURCY_CODE'      : 'MFI Base Currency',
-    'MFI_LENGTH_IN_MTH'        : 'MFI Period Length (Months)',
-    'MFI_STATEMENT_STS'        : 'MFI Statement Status',
-    'MFI_PROC_DTE'             : 'MFI Processing Date',
-    'MFI_SALES'                : 'MFI Sales Revenue (SGD)',
-    'MFI_COGS'                 : 'MFI COGS (SGD)',
-    'MFI_GROSS_PNL'            : 'MFI Gross Operating P&L (SGD)',
-    'MFI_PRETAX_PNL_BEFORE_INT': 'MFI Pre-Tax P&L Before Int (SGD)',
-    'MFI_PNL_BEFORE_TAX'       : 'MFI Profit Before Tax (SGD)',
-    'MFI_PNL_AFT_TAX'          : 'MFI Profit After Tax (SGD)',
-    'MFI_EBITDA'               : 'MFI EBITDA (SGD)',
-    'MFI_TOT_AST'              : 'MFI Total Assets (SGD)',
-    'MFI_CURR_AST'             : 'MFI Current Assets (SGD)',
-    'MFI_NON_CURR_AST'         : 'MFI Non-Current Assets (SGD)',
-    'MFI_TOT_LBLTY'            : 'MFI Total Liabilities (SGD)',
-    'MFI_CURR_LBLTY'           : 'MFI Current Liabilities (SGD)',
-    'MFI_NON_CURR_LBLTY'       : 'MFI Non-Current Liabilities (SGD)',
-    'MFI_TOT_EQUITY'           : 'MFI Total Equity (SGD)',
-    'MFI_ST_DEBT'              : 'MFI Short-Term Debt (SGD)',
-    'MFI_LT_DEBT'              : 'MFI Long-Term Debt (SGD)',
-    'MFI_TOTAL_DEBT'           : 'MFI Total Debt (SGD)',
-    'MFI_DEBT_SERVICE'         : 'MFI Debt Service (SGD)',
-    'MFI_TANGIBLE_NET_WORTH'   : 'MFI Tangible Net Worth (SGD)',
-    'MFI_ADJ_TNW'              : 'MFI Adjusted TNW (SGD)',
-    'MFI_DCSR'                 : 'MFI DSCR',
-    'MFI_GEARING'              : 'MFI Gearing Ratio',
-    # CIP column renames
-    'CIP_FAC_LIMIT_SGD'                  : 'CIP Facility Limit (SGD)',
-    'CIP_LOAN_BALANCE_SGD'               : 'CIP Loan Balance (SGD)',
-    'CIP_NPL_BALANCE_SGD'                : 'CIP NPL Balance (SGD)',
-    'CIP_SEC_AMT'                        : 'CIP Security Amount (SGD)',
-    'CIP_SEC_EMV'                        : 'CIP Estimated Market Value (SGD)',
-    'CIP_SEC_FSV'                        : 'CIP Forced Sale Value (SGD)',
-    'CIP_SEC_FIV'                        : 'CIP Fire Insurance Value (SGD)',
-    'CIP_N_PROPERTIES'                   : 'CIP No. Properties',
-    'CIP_N_ACC_TOTAL'                    : 'CIP Total Accounts',
-    'CIP_N_ACC_OPEN'                     : 'CIP Open Accounts',
-    'CIP_N_ACC_CLOSED'                   : 'CIP Closed Accounts',
-    'CIP_EARLIEST_AC_OPN_DTE'            : 'CIP Earliest Account Open Date',
-    'CIP_LATEST_AC_OPN_DTE'              : 'CIP Latest Account Open Date',
-    # *** new | 4 additional open/close date cols
-    'EARLIEST_OPEN_AC_OPN_DTE'           : 'CIP Earliest Open Account Date',
-    'LATEST_OPEN_AC_OPN_DTE'             : 'CIP Latest Open Account Date',
-    'EARLIEST_CLOSED_AC_OPN_DTE'         : 'CIP Earliest Closed Account Date',
-    'LATEST_AC_CLS_DTE'                  : 'CIP Latest Account Close Date',
-    'CIP_FAC_PROC_DTE'                   : 'CIP Facility Processing Date',
-    'CIP_BALANCE_PROC_DTE'               : 'CIP Balance Processing Date',
-    'CIP_LATEST_DEFAULT_DTE'             : 'CIP Latest Default Date',
-    'CIP_JTC_FLAG'                       : 'CIP JTC Properties Count',
-    'CIP_PBD_OCCP_TYPE_OWNOCCPD_COUNT'   : 'CIP Owner Occupied Properties',
-    'CIP_PBD_OCCP_TYPE_TENANTED_COUNT'   : 'CIP Tenanted Properties',
-    'CIP_PBD_OCCP_TYPE_BIZOPS_COUNT'     : 'CIP Business Ops Properties',
-    'CIP_PBD_OCCP_TYPE_VACANT_COUNT'     : 'CIP Vacant Properties',
-    # FAST
-    'source_fast'            : 'In FAST Network',
-    'fast_degree_trade_mb'    : 'FAST Connections - Trade Customers',
-    'fast_degree_non_trade_mb': 'FAST Connections - Non-Trade Customers',
-    'fast_degree_non_mb'      : 'FAST Connections - Non-Maybank',
-    'fast_degree_total'       : 'FAST Total Connections',
-    'fast_ord_freq'           : 'FAST Transactions Sent (Count)',
-    'fast_ord_amt'            : 'FAST Amount Sent (SGD)',
-    'fast_bene_freq'          : 'FAST Transactions Received (Count)',
-    'fast_bene_amt'           : 'FAST Amount Received (SGD)',
-    'fast_net_flow_amt'       : 'FAST Net Flow (SGD)',
-    'fast_self_transfer_count': 'FAST Self-Transfer (Count)',
-    'fast_self_transfer_amt'  : 'FAST Self-Transfer Amount (SGD)',
-    # GIRO
-    'source_giro'             : 'In GIRO Network',
-    'giro_degree_trade_mb'    : 'GIRO Connections - Trade Customers',
-    'giro_degree_non_trade_mb': 'GIRO Connections - Non-Trade Customers',
-    'giro_degree_non_mb'      : 'GIRO Connections - Non-Maybank',
-    'giro_degree_total'       : 'GIRO Total Connections',
-    'giro_ord_freq'           : 'GIRO Transactions Sent (Count)',
-    'giro_ord_amt'            : 'GIRO Amount Sent (SGD)',
-    'giro_bene_freq'          : 'GIRO Transactions Received (Count)',
-    'giro_bene_amt'           : 'GIRO Amount Received (SGD)',
-    'giro_net_flow_amt'       : 'GIRO Net Flow (SGD)',
-    'giro_self_transfer_count': 'GIRO Self-Transfer (Count)',
-    'giro_self_transfer_amt'  : 'GIRO Self-Transfer Amount (SGD)',
-    # Payment combined
+    'fitas_degree_non_mb'      : 'FITAS Connections - Non-Maybank',
+    'fitas_degree_total'       : 'FITAS Total Connections',
+    'aa_degree_trade_mb'       : 'AA Paper Connections - Trade Customers',
+    'aa_degree_non_trade_mb'   : 'AA Paper Connections - Non-Trade Customers',
+    'aa_degree_non_mb'         : 'AA Paper Connections - Non-Maybank',
+    'aa_degree_total'          : 'AA Paper Total Connections',
+    'fast_degree_trade_mb'     : 'FAST Connections - Trade Customers',
+    'fast_degree_non_trade_mb' : 'FAST Connections - Non-Trade Customers',
+    'fast_degree_non_mb'       : 'FAST Connections - Non-Maybank',
+    'fast_degree_total'        : 'FAST Total Connections',
+    'giro_degree_trade_mb'     : 'GIRO Connections - Trade Customers',
+    'giro_degree_non_trade_mb' : 'GIRO Connections - Non-Trade Customers',
+    'giro_degree_non_mb'       : 'GIRO Connections - Non-Maybank',
+    'giro_degree_total'        : 'GIRO Total Connections',
     'payment_degree_trade_mb'    : 'Payment Connections - Trade Customers',
     'payment_degree_non_trade_mb': 'Payment Connections - Non-Trade Customers',
     'payment_degree_non_mb'      : 'Payment Connections - Non-Maybank',
     'payment_degree_total'       : 'Payment Total Connections',
-    'payment_ord_freq'           : 'Payment Transactions Sent (Count)',
-    'payment_ord_amt'            : 'Payment Amount Sent (SGD)',
-    'payment_bene_freq'          : 'Payment Transactions Received (Count)',
-    'payment_bene_amt'           : 'Payment Amount Received (SGD)',
-    'payment_net_flow_amt'       : 'Payment Net Flow (SGD)',
-    'payment_self_transfer_count': 'Payment Self-Transfer (Count)',
-    'payment_self_transfer_amt'  : 'Payment Self-Transfer Amount (SGD)',
-    # All Transactions = FITAS + Payment
     'all_txn_degree_trade_mb'    : 'All Txn Connections - Trade Customers',
     'all_txn_degree_non_trade_mb': 'All Txn Connections - Non-Trade Customers',
     'all_txn_degree_non_mb'      : 'All Txn Connections - Non-Maybank',
     'all_txn_degree_total'       : 'All Txn Total Connections',
-    'all_txn_ord_freq'           : 'All Txn Transactions Sent (Count)',
-    'all_txn_ord_amt'            : 'All Txn Amount Sent (SGD)',
-    'all_txn_bene_freq'          : 'All Txn Transactions Received (Count)',
-    'all_txn_bene_amt'           : 'All Txn Amount Received (SGD)',
-    'all_txn_net_flow_amt'       : 'All Txn Net Flow (SGD)',
-    # Latest record dates per source (global value, same on every row).
-    'tt_yr'                      : 'TT Latest Record',
-    'fitas_yr'                   : 'FITAS Latest Record',
-    'fast_yr'                    : 'FAST Latest Record',
-    'giro_yr'                    : 'GIRO Latest Record',
-    'all_txn_yr'                 : 'All Txn Latest Record',
+    # ── per-source flow metrics (freq + amount + net flow + self-transfer) ──
+    'tt_ord_freq'           : 'TT Transactions Sent (Count)',
+    'tt_ord_amt'            : 'TT Amount Sent (SGD)',
+    'tt_bene_freq'          : 'TT Transactions Received (Count)',
+    'tt_bene_amt'           : 'TT Amount Received (SGD)',
+    'tt_net_flow_amt'       : 'TT Net Flow (SGD)',
+    'tt_self_transfer_count': 'TT Self-Transfer (Count)',
+    'tt_self_transfer_amt'  : 'TT Self-Transfer Amount (SGD)',
+    'fitas_ord_freq'        : 'FITAS Transactions Sent (Count)',
+    'fitas_ord_amt'         : 'FITAS Amount Sent (SGD)',
+    'fitas_bene_freq'       : 'FITAS Transactions Received (Count)',
+    'fitas_bene_amt'        : 'FITAS Amount Received (SGD)',
+    'fitas_net_flow_amt'    : 'FITAS Net Flow (SGD)',
+    'fitas_total_amt'       : 'FITAS Total Amount (SGD)',
+    'fast_ord_freq'         : 'FAST Transactions Sent (Count)',
+    'fast_ord_amt'          : 'FAST Amount Sent (SGD)',
+    'fast_bene_freq'        : 'FAST Transactions Received (Count)',
+    'fast_bene_amt'         : 'FAST Amount Received (SGD)',
+    'fast_net_flow_amt'     : 'FAST Net Flow (SGD)',
+    'fast_self_transfer_count': 'FAST Self-Transfer (Count)',
+    'fast_self_transfer_amt': 'FAST Self-Transfer Amount (SGD)',
+    'giro_ord_freq'         : 'GIRO Transactions Sent (Count)',
+    'giro_ord_amt'          : 'GIRO Amount Sent (SGD)',
+    'giro_bene_freq'        : 'GIRO Transactions Received (Count)',
+    'giro_bene_amt'         : 'GIRO Amount Received (SGD)',
+    'giro_net_flow_amt'     : 'GIRO Net Flow (SGD)',
+    'giro_self_transfer_count': 'GIRO Self-Transfer (Count)',
+    'giro_self_transfer_amt': 'GIRO Self-Transfer Amount (SGD)',
+    'payment_ord_freq'      : 'Payment Transactions Sent (Count)',
+    'payment_ord_amt'       : 'Payment Amount Sent (SGD)',
+    'payment_bene_freq'     : 'Payment Transactions Received (Count)',
+    'payment_bene_amt'      : 'Payment Amount Received (SGD)',
+    'payment_net_flow_amt'  : 'Payment Net Flow (SGD)',
+    'payment_self_transfer_count': 'Payment Self-Transfer (Count)',
+    'payment_self_transfer_amt'  : 'Payment Self-Transfer Amount (SGD)',
+    'all_txn_ord_freq'      : 'All Txn Transactions Sent (Count)',
+    'all_txn_ord_amt'       : 'All Txn Amount Sent (SGD)',
+    'all_txn_bene_freq'     : 'All Txn Transactions Received (Count)',
+    'all_txn_bene_amt'      : 'All Txn Amount Received (SGD)',
+    'all_txn_net_flow_amt'  : 'All Txn Net Flow (SGD)',
+    # ── latest record per source (constant per row from Recipe 1) ────────
+    'tt_yr'     : 'TT Latest Record',
+    'fitas_yr'  : 'FITAS Latest Record',
+    'fast_yr'   : 'FAST Latest Record',
+    'giro_yr'   : 'GIRO Latest Record',
+    'all_txn_yr': 'All Txn Latest Record',
+    # ── derived facility cols (computed in Recipe 3 below) ──────────────
+    'TF_LCY_OUTSTANDING'    : 'Trade Outstanding Balance (SGD)',
+    'TF_LCY_UTILISATION_PCT': 'Trade Utilisation (%)',
 }
+
+NODE_RENAME = {**_FIELD_CONFIG_RENAME, **_FLOW_METRIC_RENAME}
 
 EDGE_RENAME = {
     'SOURCE_UEN': 'Source (UEN)', 'source_name': 'Source (Name)',
@@ -1482,7 +1373,7 @@ NODE_SECTIONS = [
         'GIRO Latest Record',
         'GIRO Net Flow (SGD)',  # show this
     ]},
-    # 6. FITAS Network -- 9 hidden + FITAS Total Amount (visible)
+    # 6. FITAS Network -- 10 hidden + FITAS Total Amount (visible)
     {'color': 'F9E4D4', 'columns': [
         'FITAS Connections - Trade Customers',
         'FITAS Connections - Non-Trade Customers',
@@ -1490,6 +1381,7 @@ NODE_SECTIONS = [
         'FITAS Total Connections',
         'FITAS Transactions Sent (Count)',     'FITAS Amount Sent (SGD)',
         'FITAS Transactions Received (Count)', 'FITAS Amount Received (SGD)',
+        'FITAS Net Flow (SGD)',  # *** fix | display name for fitas_net_flow_amt; consumed by Recipe 4 Section E
         'FITAS Latest Record',
         'FITAS Total Amount (SGD)',  # show this
     ]},
@@ -1725,7 +1617,7 @@ PAIRS_SECTIONS = [
         'FITAS OAT Amount (SGD)', 'FITAS Others Amount (SGD)',
     ]},
     {'color': 'FFF4CC', 'columns': [
-        'FITAS Trade Amount (SGD)', 'TT Transaction Amount (SGD)', 'Grand Total Amount (SGD)',
+        'FITAS Trade Amount (SGD)', 'Payment Transaction Amount (SGD)', 'Grand Total Amount (SGD)',
     ]},
     {'color': 'D4F1E8', 'columns': [
         'In FAST', 'In GIRO', 'In Payment',
@@ -1757,8 +1649,12 @@ _PAIRS_FLAT_COLS = [c for sec in PAIRS_SECTIONS for c in sec['columns']]
 def _prepare_pairs_for_excel(pairs_df):
     df = pairs_df.copy()
     df = df.rename(columns=PAIRS_RENAME)
+    # *** fix | column previously labelled "TT Transaction Amount" but the
+    # value is Grand Total - FITAS Trade = Payment combined (TT+FAST+GIRO).
+    # Rename to "Payment Transaction Amount (SGD)" so the summary band
+    # (FITAS / Payment / Grand Total) reflects the post-refactor analytic.
     if 'Grand Total Amount (SGD)' in df.columns and 'FITAS Trade Amount (SGD)' in df.columns:
-        df['TT Transaction Amount (SGD)'] = (
+        df['Payment Transaction Amount (SGD)'] = (
             df['Grand Total Amount (SGD)'].fillna(0) -
             df['FITAS Trade Amount (SGD)'].fillna(0)
         ).apply(lambda v: int(round(v)) if pd.notna(v) else None)
@@ -2154,7 +2050,7 @@ tt_filtered = edges_filtered_final[edges_filtered_final['Data Source'] == 'Conso
 print("\n" + "="*60)
 print("COMPARISON SUMMARY")
 print("="*60)
-print(f"\n  Filter: drop TT edge rows where txn_amt < S${TT_EDGE_MIN_AMT:,} per direction")
+print(f"\n  Filter: drop a (SOURCE,TARGET) per-direction row if Payment combined (TT+FAST+GIRO) < S${THRESHOLD_TXN_SGD:,}")
 print(f"          then remove nodes with zero remaining edges (all sources)")
 print(f"\n  {'Metric':<35} {'Full':>10} {'Filtered':>10} {'Removed':>10} {'%':>7}")
 print(f"  {'-'*35} {'-'*10} {'-'*10} {'-'*10} {'-'*7}")

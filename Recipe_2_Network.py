@@ -14,7 +14,11 @@ if os.getenv('DATAIKU_ENV') == 'local':
 # RECIPE 2: Network Graph HTML Generation
 # Loads pickle cache and generates interactive HTML visualization.
 # NO PyVis, NO neighbor cache -- in-browser BFS from adjacency maps.
-# Edge architecture: undirected (RSME/AA/FITAS) + directed (TT) + selfloop
+# Edge classes at render time (pairRelationshipMap flags, not table names):
+#   undirected (RSME-only, no arrow): pair in RSME AND NOT in payment/FITAS/AA
+#   both-ways (arrows both ends)    : RelationshipBuilder is_both=True
+#   directed (single arrow)         : FITAS, AA, Payment combined (TT+FAST+GIRO), or mix
+#   self-loop                       : Payment combined + FITAS self-transfers
 # Generates 4 HTML files: full, full_minified, filtered, filtered_minified.
 # ────────────────────────────────────────────────────────────────────────────
 
@@ -62,13 +66,12 @@ _fitas_summary           = cache['fitas_summary']
 consol_tt_metric_ranges  = cache['consol_tt_metric_ranges']
 fitas_metric_ranges      = cache['fitas_metric_ranges']
 _directed_edges_df_full  = cache['directed_edges_df']
-tt_edge_min_amt_cached   = cache.get('tt_edge_min_amt', None)
 
 # ── Pre-filtered selfloops -- same values as Recipe 1, no float gap ───────
 if 'selfloop_edges_df_filtered' not in cache:
     raise KeyError(
         "selfloop_edges_df_filtered not found in pickle. "
-        "Re-run Recipe 1 with the updated Cell 14 to generate it."
+        "Re-run Recipe 1 (Cell 14) to generate it."
     )
 _selfloop_edges_df_filtered = cache['selfloop_edges_df_filtered']
 
@@ -76,7 +79,7 @@ _selfloop_edges_df_filtered = cache['selfloop_edges_df_filtered']
 if 'directed_edges_df_filtered' not in cache:
     raise KeyError(
         "directed_edges_df_filtered not found in pickle. "
-        "Re-run Recipe 1 with the updated Cell 10 to generate the filtered edge set."
+        "Re-run Recipe 1 (Cell 10) to generate the filtered edge set."
     )
 _directed_edges_df_filtered = cache['directed_edges_df_filtered']
 
@@ -139,12 +142,35 @@ print(f"  Enriched nodes:                {len(_enriched_nodes):,}")
 print(f"  RSME adjacency:                {len(_rsme_adjacency):,} nodes")
 print(f"  Original sizes:                {len(_original_sizes_js):,} nodes")
 print(f"  Undirected edges:              {len(_undirected_edges_df):,}")
-print(f"  Directed edges (full):         {len(_directed_edges_df_full):,}")
-print(f"  Directed edges (filtered):     {len(_directed_edges_df_filtered):,}")
+print(f"  TT directed edges (full):      {len(_directed_edges_df_full):,}")
+print(f"  TT directed edges (filtered):  {len(_directed_edges_df_filtered):,}")
 print(f"  TT self-loops (full):          {len(_selfloop_edges_df):,}")
 print(f"  TT self-loops (filtered):      {len(_selfloop_edges_df_filtered):,}")
 print(f"  Relationship pairs:            {len(_relationship_df):,}")
-print(f"  TT edge filter threshold:      S${tt_edge_min_amt_cached:,}  (set in Recipe 1)")
+print(f"  Payment threshold (per-dir):   S${threshold_txn_sgd_cached:,}  (TT+FAST+GIRO combined; set in Recipe 1)")
+
+# ── Round amount columns once, in place, to shrink JSON payload ──────────
+# Every *_amt column → whole units, every *_amt_pct column → 1dp. Both
+# modes (full / filtered) read from these DataFrames, so one pass is enough.
+from network_graph.pipeline.enricher import Enricher as _E
+for _df in (
+    _undirected_edges_df, _selfloop_edges_df, _selfloop_edges_df_filtered,
+    _directed_edges_df_full, _directed_edges_df_filtered,
+    _relationship_df,
+    _tt_summary, _tt_summary_filtered,
+    _fitas_summary, _fitas_summary_filtered,
+    _fast_summary, _fast_summary_filtered,
+    _giro_summary, _giro_summary_filtered,
+    _payment_summary, _payment_summary_filtered,
+    _all_txn_summary, _all_txn_summary_filtered,
+    _payment_directed_edges_df_full, _payment_directed_edges_df_filtered,
+    _all_txn_selfloop_edges_df_full, _all_txn_selfloop_edges_df_filtered,
+    _payment_selfloop_edges_df_full, _payment_selfloop_edges_df_filtered,
+    _fitas_selfloop_edges_df_full, _fitas_selfloop_edges_df_filtered,
+    _fast_edges_filtered, _giro_edges_filtered,
+):
+    _E.round_amount_columns(_df)
+print("  Amount columns rounded (whole units; 1dp for *_amt_pct)")
 
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
 # Cell 3: Build per-mode data function
@@ -623,7 +649,7 @@ print(f"\n  Size comparison:")
 print(f"    Full:      {html_sizes['full']:.2f} MB")
 print(f"    Filtered:  {html_sizes['filtered']:.2f} MB")
 print(f"    Reduction: {(html_sizes['full'] - html_sizes['filtered']) / html_sizes['full'] * 100:.1f}%")
-print(f"\n  TT edge filter threshold: S${tt_edge_min_amt_cached:,}  (set in Recipe 1)")
+print(f"\n  Payment threshold (per-dir): S${threshold_txn_sgd_cached:,}  (TT+FAST+GIRO combined; set in Recipe 1)")
 print(f"  Relationship pairs loaded: {len(_relationship_df):,}  (available for diagnostics)")
 print(f"  No neighbor cache -- in-browser BFS from adjacency maps")
 print(f"  Blank canvas with lazy node injection")
