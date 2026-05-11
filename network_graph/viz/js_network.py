@@ -338,25 +338,16 @@ function _resetLastEdgeHighlight() {
 function highlightNode(id) {
     _resetLastEdgeHighlight();
     if (_lastHighlighted !== null) {
-        nodes.update({id: _lastHighlighted, shadow: {enabled: false}});
         resetEdgeColors();
     }
     if (!id) { _lastHighlighted = null; return; }
 
-    // Glow colour matches the node's own background colour so each customer
-    // type / Malaysian square gets a halo in its own brand colour. Falls
-    // back to CFG default if the node has no readable colour.
-    var _nodeForGlow = nodes.get(id);
-    var glowColor    = (_nodeForGlow && _nodeForGlow.color && _nodeForGlow.color.background)
-                       ? _nodeForGlow.color.background
-                       : CFG.node_selected_shadow_color;
-    nodes.update({id: id, shadow: {
-        enabled: true,
-        color  : glowColor,
-        size   : CFG.node_selected_shadow_size,
-        x      : 0,
-        y      : 0,
-    }});
+    // *** updated | Shadow halo on selected node removed entirely.
+    // vis.js's built-in selectNodes([id]) (called by the click handler)
+    // applies a default selection visual, and the side-panel update is the
+    // primary "this node is selected" feedback. Removing the per-click
+    // shadow set/clear + the GPU-expensive blur saves a chunk of click
+    // frame time on every interaction.
 
     var upd = [];
     edges.get().forEach(function(e) {
@@ -402,7 +393,6 @@ network.on("click", function(params) {
 
     } else if (params.edges.length > 0) {
         if (_lastHighlighted !== null) {
-            nodes.update({id: _lastHighlighted, shadow: {enabled: false}});
             _lastHighlighted = null;
         }
         resetEdgeColors();
@@ -441,7 +431,6 @@ network.on("click", function(params) {
     } else {
         _resetLastEdgeHighlight();
         if (_lastHighlighted !== null) {
-            nodes.update({id: _lastHighlighted, shadow: {enabled: false}});
             _lastHighlighted = null;
         }
         resetEdgeColors();

@@ -33,11 +33,11 @@ class VizConfig:
     node_size_max               = 50
 
     # ── Selected-node visual feedback ────────────────────────────────────────
-    # Glow halo applied via vis.js per-node shadow when a node is highlighted.
-    # color   : halo colour (Maybank brand yellow by default)
-    # size    : blur radius -- larger = more diffuse glow
-    node_selected_shadow_color  = "#FBBA00"
-    node_selected_shadow_size   = 25
+    # *** updated | Halo shadow removed entirely (was a 25px gold blur).
+    # Selection feedback now comes from vis.js's built-in selectNodes visual
+    # plus the side-panel content swap. Shadow constants kept here only as
+    # documentation of what used to live in CFG; the related JS branches
+    # in js_network.py / js_export.py / js_reset.py have all been removed.
 
     # ── Search ────────────────────────────────────────────────────────────────
     search_max_results = 10
@@ -77,8 +77,6 @@ var CFG = {{
     default_top_n                    : {self.default_top_n},
     node_size_min                    : {self.node_size_min},
     node_size_max                    : {self.node_size_max},
-    node_selected_shadow_color       : "{self.node_selected_shadow_color}",
-    node_selected_shadow_size        : {self.node_selected_shadow_size},
     search_max_results               : {self.search_max_results},
     search_debounce_ms               : {self.search_debounce_ms},
     rsme_edge_color                  : "{self.rsme_edge_color}",

@@ -62,9 +62,10 @@ resetAll = function() {
         localStorage.removeItem(LS_HISTORY);
     } catch(e) {}
 
-    // Clear node highlight -- _lastHighlighted is compressed string ID
+    // Clear node highlight -- _lastHighlighted is compressed string ID.
+    // *** updated | shadow halo removed from highlightNode, so nothing to
+    // clear on the node itself. Just reset the tracking variable.
     if (_lastHighlighted !== null) {
-        nodes.update({id: _lastHighlighted, shadow: {enabled: false}});
         _lastHighlighted = null;
     }
 

@@ -219,8 +219,6 @@ function exportCurrentView() {
             consol_tt_edge_highlight_color   : CFG.consol_tt_edge_highlight_color,
             consol_tt_edge_highlight_opacity : CFG.consol_tt_edge_highlight_opacity,
             consol_tt_edge_smooth_roundness  : CFG.consol_tt_edge_smooth_roundness,
-            node_selected_shadow_color       : CFG.node_selected_shadow_color,
-            node_selected_shadow_size        : CFG.node_selected_shadow_size,
         };
 
         // ── 6. Focal company + filename ───────────────────────────────────
@@ -1031,9 +1029,10 @@ function buildExportHTML(payloadJson, filename) {
     p.push('    color:e._rsmeOnly');
     p.push('      ?{color:CFG.rsme_edge_color,opacity:CFG.rsme_edge_opacity}');
     p.push('      :{color:CFG.consol_tt_edge_color,opacity:CFG.consol_tt_edge_opacity}});}_lastHE=null;}');
-    p.push('function highlightNode(id){_resetLastEdgeHL();if(_lastH!==null){nodes.update({id:_lastH,shadow:{enabled:false}});resetEdgeColors();}if(!id){_lastH=null;return;}');
-    p.push('  var _ng=nodes.get(id);var _gc=(_ng&&_ng.color&&_ng.color.background)?_ng.color.background:CFG.node_selected_shadow_color;');
-    p.push('  nodes.update({id:id,shadow:{enabled:true,color:_gc,size:CFG.node_selected_shadow_size,x:0,y:0}});');
+    // *** updated | shadow halo removed -- vis.js's built-in selectNodes
+    // is the only selection visual; saves a nodes.update per click + the
+    // GPU-expensive blur on canvas redraw.
+    p.push('function highlightNode(id){_resetLastEdgeHL();if(_lastH!==null){resetEdgeColors();}if(!id){_lastH=null;return;}');
     p.push('  var upd=[];edges.get().forEach(function(e){if(e.hidden)return;if(e.from!==id&&e.to!==id)return;');
     p.push('    var bw=e._baseWidth!==undefined?e._baseWidth:(e.width||1);');
     p.push('    if(e._rsmeOnly)bw=bw*CFG.rsme_edge_highlight_mult;');
@@ -1047,7 +1046,7 @@ function buildExportHTML(payloadJson, filename) {
     p.push('    var cid=params.nodes[0],uid=_d(cid);');
     p.push('    _resetLastEdgeHL();highlightNode(cid);currentNode=uid;showNodeInfo(uid);network.selectNodes([cid]);');
     p.push('  } else if(params.edges.length>0){');
-    p.push('    if(_lastH!==null){nodes.update({id:_lastH,shadow:{enabled:false}});_lastH=null;}');
+    p.push('    if(_lastH!==null){_lastH=null;}');
     p.push('    resetEdgeColors();');
     p.push('    var eid=params.edges[0],edge=edges.get(eid);');
     p.push('    if(edge){');
@@ -1060,7 +1059,7 @@ function buildExportHTML(payloadJson, filename) {
     p.push('      if(edge._isSelfLoop)showSelfLoopInfo(edge);');
     p.push('      else showEdgeInfo(edge);}');
     p.push('  } else {');
-    p.push('    _resetLastEdgeHL();if(_lastH!==null){nodes.update({id:_lastH,shadow:{enabled:false}});_lastH=null;}resetEdgeColors();clearSidePanel();}');
+    p.push('    _resetLastEdgeHL();if(_lastH!==null){_lastH=null;}resetEdgeColors();clearSidePanel();}');
     p.push('});');
 
     p.push('network.on("doubleClick",function(params){if(params.nodes.length>0)showNodeInfo(_d(params.nodes[0]));});');
