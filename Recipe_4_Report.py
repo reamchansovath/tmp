@@ -34,7 +34,14 @@ def load_excel_report(folder, filename):
     print(f"  {filename}: sheets = {sheets}")
     nodes_df = pd.read_excel(io.BytesIO(raw), sheet_name=sheets[0])
     edges_df = pd.read_excel(io.BytesIO(raw), sheet_name=sheets[1])
-    return nodes_df, edges_df
+    # *** new | Sheet 3 (Buyer-Supplier Pairs) -- one row per unique pair.
+    # Used only for the dataset-level "Relationships" count on the landing
+    # page (a true unique-pair count, not edge-row count which double-counts
+    # by source / direction). Empty DataFrame fallback if the sheet is absent
+    # so older xlsx files still load.
+    pairs_df = (pd.read_excel(io.BytesIO(raw), sheet_name=sheets[2])
+                if len(sheets) >= 3 else pd.DataFrame())
+    return nodes_df, edges_df, pairs_df
 
 LOGO_B64 = ""
 LOGO_PATHS_TO_TRY = [
@@ -68,15 +75,16 @@ FALLBACK = "MEXT_SCREENER_full.xlsx"
 
 if f"/{TARGET}" in available:
     print(f"\nLoading: {TARGET}")
-    nodes_df, edges_df = load_excel_report(Network_Graph_Report, TARGET)
+    nodes_df, edges_df, pairs_df = load_excel_report(Network_Graph_Report, TARGET)
 elif f"/{FALLBACK}" in available:
     print(f"\nFalling back to: {FALLBACK}")
-    nodes_df, edges_df = load_excel_report(Network_Graph_Report, FALLBACK)
+    nodes_df, edges_df, pairs_df = load_excel_report(Network_Graph_Report, FALLBACK)
 else:
     raise FileNotFoundError("No report Excel found in input folder.")
 
 print(f"\nNodes: {len(nodes_df):,} rows x {nodes_df.shape[1]} cols")
 print(f"Edges: {len(edges_df):,} rows x {edges_df.shape[1]} cols")
+print(f"Pairs: {len(pairs_df):,} rows x {pairs_df.shape[1]} cols  (unique relationships)")
 
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
 # -------------------------------------------------------------------------------- NOTEBOOK-CELL: CODE
@@ -768,6 +776,7 @@ print(f"  CIP property UENs in report : {len(cip_props_filtered):,} / {len(cip_p
 GEN_DATE    = datetime.now().strftime("%d %b %Y")
 N_COMPANIES = len(std_nodes)
 N_EDGES     = len(std_edges)
+PAIRS_COUNT = len(pairs_df)   # one row per unique (A,B) pair from Excel Sheet 3
 
 if LOGO_B64:
     LOGO_CSS = ".ph-logo-bg{background-image:url('" + LOGO_B64 + "');}"
@@ -994,7 +1003,11 @@ const EDGES     = {edges_json_str};
 const CIP_PROPS = {cip_props_json_str};
 
 document.getElementById('stat-n').textContent = NODES.length.toLocaleString();
-document.getElementById('stat-e').textContent = EDGES.length.toLocaleString();
+// *** updated | Landing-page "Relationships" stat now counts unique pairs
+// from Excel Sheet 3 (Buyer-Supplier Pairs), not Sheet 2 (Edges). One row
+// per (A,B) pair regardless of source or direction -- so A<->B counts as 1
+// instead of being inflated by source / direction combinations.
+document.getElementById('stat-e').textContent = ({PAIRS_COUNT}).toLocaleString();
 
 const dv    = v => (v == null || v === '') ? '-' : v;
 // Negatives shown in accounting-style parentheses, eg. -45000 -> "(S$ 45,000)".
