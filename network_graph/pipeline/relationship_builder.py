@@ -16,7 +16,8 @@ import pandas as pd
 import numpy as np
 from ..sources.fitas_source import FITAS_BUYER_PRODUCTS, FITAS_SUPPLIER_PRODUCTS
 
-_INVALID_IDS  = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+from ..sources.base_source import BaseSource as _BS
+_INVALID_IDS = _BS.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 # Known FITAS products -- anything else maps to 'OTHERS'
 _ALL_FITAS_PRODUCTS = ['LC', 'TR', 'STA', 'EXPORTLC', 'FBEP', 'OAT', 'OTHERS']
@@ -357,8 +358,12 @@ class RelationshipBuilder:
         row.update(self._extract_fitas_fields(pair, fitas))
         row.update(self._extract_all_txn_fields(row, pair, fitas))
 
-        # Grand total kept for backwards compat -- equal to all_txn_total_amt
-        row['grand_total_amt'] = row.get('all_txn_total_amt') or 0.0
+        # Grand total kept for backwards compat -- equal to all_txn_total_amt.
+        # *** fix | preserve None when no payment/FITAS activity exists
+        # (RSME-only pair). Previously `or 0.0` collapsed None -> 0.0,
+        # making Excel's "Grand Total Amount (SGD)" show 0 for genuinely
+        # transactionless pairs instead of blank.
+        row['grand_total_amt'] = row.get('all_txn_total_amt')
 
         # Priority chain
         if fitas is not None:

@@ -94,16 +94,20 @@ applyFilters = function() {
     // Reads _inRsme/_inFitas/_inAA/_inTT from vis.js DataSet edges.
     // These flags are mapped from pairRelationshipMap abbreviated keys
     // (ir/if/ia/it) during edge injection in js_network.py.
-    // Self-loops now span all 4 sources (TT/MEPS/FAST/GIRO/FITAS). Visible
-    // if either Payment or FITAS filter is on. AA Paper / RSME self-loops are
-    // not drawn (no transaction count/amount available on those sources).
+    // Self-loops span All-Txn (Payment ∪ FITAS). Each self-loop edge now
+    // carries _inPayment and _inFitas flags reflecting actual source
+    // presence (set in js_network.py from paymentSelfLoopIds /
+    // fitasSelfLoopIds), so the source filter behaves like non-self-loops:
+    // a FITAS-only self-transfer is hidden under Payment-only filter, etc.
+    // AA Paper / RSME self-loops are not drawn.
     var edgeCounts = {};
 
     var edgeUpd = edges.get().map(function(e) {
         var visible = false;
 
         if (e._isSelfLoop) {
-            visible = filt.payment || filt.fitas;
+            visible = (filt.payment && !!e._inPayment) ||
+                      (filt.fitas   && !!e._inFitas);
         } else {
             visible = (filt.rsme    && !!e._inRsme)    ||
                       (filt.aaPaper && !!e._inAA)      ||
@@ -264,16 +268,11 @@ function getRSMENodeSize(nid, metric)    { return _initialSize(nid); }
 // (trigger label + click-outside-to-close + checkbox change handlers)
 // ══════════════════════════════════════════════════════════════════════════
 
-function _renderTriggerLabel(filterKey) {
-    var labelEl = document.getElementById('dd-' + filterKey + '-label');
-    if (!labelEl) return;
-    var set     = (filterKey === 'sources') ? _selectedSources : _selectedCountries;
-    var total   = (filterKey === 'sources') ? 4 : 2;
-    var allLbl  = (filterKey === 'sources') ? 'All Sources' : 'All Countries';
-    if (set.size === total)  labelEl.textContent = allLbl;
-    else if (set.size === 0) labelEl.textContent = 'None';
-    else                     labelEl.textContent = set.size + ' selected';
-}
+// Trigger label is intentionally static ("Sources" / "Countries") so the
+// dropdown always shows the *category name*. Selection state is conveyed
+// by the active-filter pills below the toolbar, not by mutating the label.
+// Kept as a no-op so existing callers still link.
+function _renderTriggerLabel(filterKey) { /* no-op */ }
 
 function _renderNodeSizeLabel() {
     var labels = {

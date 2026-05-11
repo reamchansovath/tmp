@@ -105,7 +105,10 @@ document.getElementById("reset-btn").addEventListener("click", resetAll);
 // compressed ID -- e.from/e.to are compressed IDs -- all correct.
 // ══════════════════════════════════════════════════════════════════════════
 
-(function() {
+// Wait for compressed payloads (rsmeNodeIds, degreeMap) before reading them.
+// Today CFG.default_top_n = 0 so this is a no-op anyway, but the wrap means
+// flipping the config in viz/config.py won't reintroduce a null-deref crash.
+__bootstrapReady.then(function() {
     if (CFG.default_top_n <= 0) return;
 
     // id = compressed string ID from rsmeNodeIds Set
@@ -120,9 +123,8 @@ document.getElementById("reset-btn").addEventListener("click", resetAll);
     nodes.update(nodes.getIds().map(function(id) {
         return {id: id, hidden: !topIds.has(id)};
     }));
-    // *** updated | edge architecture refactored to _inRsme/_inPayment/etc.
-    // The old _isConsolTT/_isFITAS/_isAAPaper flags no longer exist. RSME
-    // default-view shows undirected RSME-only edges between top-N nodes.
+    // Edges carry _inRsme/_inPayment/_inFITAS/_inAAPaper flags;
+    // RSME default-view shows undirected RSME-only edges between top-N nodes.
     edges.update(edges.get().map(function(e) {
         var visible = !!e._inRsme && !e._isSelfLoop &&
                       topIds.has(e.from) && topIds.has(e.to);
@@ -130,5 +132,5 @@ document.getElementById("reset-btn").addEventListener("click", resetAll);
     }));
 
     network.fit({animation: false});
-})();
+});
 """

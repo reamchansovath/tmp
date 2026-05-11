@@ -9,7 +9,7 @@ import pandas as pd
 from .base_source import BaseSource
 
 # Invalid ID strings -- consistent with Recipe 1 and js_core.py
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+_INVALID_IDS = BaseSource.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 
 class AAPaperSource(BaseSource):
@@ -83,9 +83,13 @@ class AAPaperSource(BaseSource):
             ~df['CPTY_UEN'].isin(_INVALID_IDS)
         ]
 
-        cpty_type  = df['COUNTERPARTY_TYPE'].astype(str).str.strip()
-        sup_mask   = cpty_type == 'Supplier'
-        buy_mask   = cpty_type == 'Buyer'
+        # *** fix | case-insensitive role match. Without .upper(), variants
+        # like 'supplier' / 'BUYER' would silently fall into other_mask and
+        # the SOURCE/TARGET assignment would default to (UEN, CPTY_UEN) --
+        # a wrong direction for any genuine supplier-perspective row.
+        cpty_type  = df['COUNTERPARTY_TYPE'].astype(str).str.strip().str.upper()
+        sup_mask   = cpty_type == 'SUPPLIER'
+        buy_mask   = cpty_type == 'BUYER'
         other_mask = ~sup_mask & ~buy_mask
 
         # ── Supplier rows: UEN=buyer -> CPTY_UEN=supplier, no flip ───────
@@ -156,10 +160,14 @@ class AAPaperSource(BaseSource):
                 self.out_adj.setdefault(src, []).append(tgt)
                 self.in_adj.setdefault(tgt, []).append(src)
 
+        # *** fix | unique-counterparty count: |out_adj ∪ in_adj|.
+        # Was: len(set(out_adj)) + len(set(in_adj)) -- per-direction deduped
+        # but still double-counted bidirectional pairs. Same semantics as
+        # _aa_deg in Recipe_1_Pipeline.py.
         for nid in self.active_uens:
-            out_degree = len(set(self.out_adj.get(nid, [])))
-            in_degree  = len(set(self.in_adj.get(nid, [])))
-            self.degree_map[nid] = out_degree + in_degree
+            self.degree_map[nid] = len(
+                set(self.out_adj.get(nid, [])) | set(self.in_adj.get(nid, []))
+            )
 
     def get_nodes(self) -> pd.DataFrame:
         """

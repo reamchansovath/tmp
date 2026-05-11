@@ -13,7 +13,7 @@
 import pandas as pd
 from .base_source import BaseSource
 
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+_INVALID_IDS = BaseSource.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 # TRN_TYP_L1_GRP values that select FAST vs GIRO rows from the shared feather
 _KIND_TO_GROUP = {'FAST': 'FST', 'GIRO': 'GIR'}
@@ -131,11 +131,19 @@ class FastGiroSource(BaseSource):
         """
         df = self.raw_df.copy()
 
+        # *** fix | DR_CR_IND must be {'CR','DR'} -- garbage/empty values
+        # used to silently default to ORD->BENE direction, which would
+        # mis-pair with reversal rows where the original was a CR. Now we
+        # drop rows whose DR_CR_IND can't be interpreted (only when the
+        # column exists; if it's absent we still fall back to ORD->BENE
+        # for the whole frame).
         if 'DR_CR_IND' in df.columns:
             ind = df['DR_CR_IND'].astype(str).str.strip().str.upper()
-            cr_mask = (ind == 'CR')
+            cr_mask    = (ind == 'CR')
+            known_mask = ind.isin(['CR', 'DR'])
         else:
-            cr_mask = pd.Series(False, index=df.index)
+            cr_mask    = pd.Series(False, index=df.index)
+            known_mask = pd.Series(True,  index=df.index)
 
         df['SOURCE_UEN'] = df['ORD_ID_CODE']
         df['TARGET_UEN'] = df['BENE_ID_CODE']
@@ -146,21 +154,28 @@ class FastGiroSource(BaseSource):
 
         valid_mask = (
             df['SOURCE_UEN'].notna() & df['TARGET_UEN'].notna() &
-            ~df['SOURCE_UEN'].isin(_INVALID_IDS) & ~df['TARGET_UEN'].isin(_INVALID_IDS)
+            ~df['SOURCE_UEN'].isin(_INVALID_IDS) & ~df['TARGET_UEN'].isin(_INVALID_IDS) &
+            known_mask
         )
         df = df[valid_mask].copy()
 
         # Reversal handling: negate amount so reversal cancels original.
-        amt = pd.to_numeric(df.get('LCY_TRN_AMT'), errors='coerce').fillna(0.0)
+        # *** fix | df.get('LCY_TRN_AMT') returns None when the column is
+        # missing entirely, and `pd.to_numeric(None)` raises TypeError.
+        # Fall back to a zero-filled series so the rest of the aggregation
+        # still runs (the source just produces zero-amount rows).
+        if 'LCY_TRN_AMT' in df.columns:
+            amt = pd.to_numeric(df['LCY_TRN_AMT'], errors='coerce').fillna(0.0)
+        else:
+            amt = pd.Series(0.0, index=df.index)
         if 'REV_IND' in df.columns:
             rev = df['REV_IND'].astype(str).str.strip().str.upper() == 'Y'
             amt = amt.where(~rev, -amt)
         df['_signed_amt'] = amt
 
-        if 'TRN_ID' in df.columns:
-            df['_trn_count_unit'] = 1
-        else:
-            df['_trn_count_unit'] = 1   # fallback; still count rows
+        # Both branches were identical -- collapsed. Each row counts as one
+        # transaction regardless of whether TRN_ID is present.
+        df['_trn_count_unit'] = 1
 
         # Aggregate
         agg = (
@@ -200,10 +215,12 @@ class FastGiroSource(BaseSource):
 
         self.self_loop_ids = set(self.selfloop_edges_df['uen'].astype(str).tolist())
 
+        # *** fix | unique-counterparty count: |out_adj ∪ in_adj|.
+        # See consol_tt_source.py for rationale. Same semantics as _fast_deg
+        # / _giro_deg in Recipe_1_Pipeline.py.
         for nid in self.active_uens:
-            self.degree_map[nid] = (
-                len(self.out_adj.get(nid, [])) +
-                len(self.in_adj.get(nid, []))
+            self.degree_map[nid] = len(
+                set(self.out_adj.get(nid, [])) | set(self.in_adj.get(nid, []))
             )
 
     # ── BaseSource interface ────────────────────────────────────────────────

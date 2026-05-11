@@ -74,10 +74,13 @@ class Classifier:
         # Previously remap_segment() was defined but never called here.
         seg_raw = df['SEGMENT'].astype(str).str.strip() if 'SEGMENT' in df.columns \
                   else pd.Series('', index=df.index)
+        # *** fix | exclude '<NA>' (pandas NA stringified) and 'NaN'/'None'
+        # as well. Previously only 'nan' was filtered; pd.NA values would
+        # leak through as the literal string '<NA>'.
         seg_valid_mask = (
             df['SEGMENT'].notna() &
             (seg_raw != '') &
-            (seg_raw != 'nan')
+            (~seg_raw.str.lower().isin(['nan', '<na>', 'none', 'null']))
         ) if 'SEGMENT' in df.columns else pd.Series(False, index=df.index)
 
         # Apply remap where segment is valid, fallback to RFS_CLASSIFICATION

@@ -8,8 +8,8 @@
 import pandas as pd
 from typing import Dict, List
 
-# Consistent with Recipe 1 Cell 1 and source files
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+from ..sources.base_source import BaseSource as _BS
+_INVALID_IDS = _BS.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 
 def build_adjacency_from_edges(edges_df: pd.DataFrame) -> Dict[str, List[str]]:

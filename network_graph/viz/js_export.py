@@ -179,6 +179,23 @@ function exportCurrentView() {
             }
         });
 
+        // FAST / GIRO / Payment: derive directly from canonical sets filtered
+        // to the visible subgraph. Matches the main app's `fastNodeIds.has(id)`
+        // / `giroNodeIds.has(id)` Data Sources checks. (We do not iterate
+        // edges for these because FAST/GIRO are sub-types of Payment, and
+        // edge-flag membership would miss self-loop-only nodes.)
+        var fastIds = [], giroIds = [];
+        if (typeof fastNodeIds !== "undefined") {
+            fastNodeIds.forEach(function(id) {
+                if (toShow.has(id)) fastIds.push(id);
+            });
+        }
+        if (typeof giroNodeIds !== "undefined") {
+            giroNodeIds.forEach(function(id) {
+                if (toShow.has(id)) giroIds.push(id);
+            });
+        }
+
         // ── 4b. Mini pairRelationshipMap for visible pairs only ───────────
         var xpairs = {};
         _visibleEdges.forEach(function(eid) {
@@ -254,6 +271,8 @@ function exportCurrentView() {
             ttIds  : ttIds,
             fitIds : fitIds,
             aaIds  : aaIds,
+            fastIds: fastIds,
+            giroIds: giroIds,
             ttself : ttself,
             fitself: fitself,
             aaself : aaself,
@@ -278,10 +297,8 @@ function exportCurrentView() {
         });
 
         // ── 8. Build + download ───────────────────────────────────────────
-        // Identical to the original (working) delivery path: Blob URL +
-        // <a download>. This worked in the previous version of the export
-        // and should still work now -- earlier delivery experiments were a
-        // dead end.
+        // Blob URL + <a download> -- cross-browser file delivery without
+        // requiring any server round-trip.
         var html = buildExportHTML(payload, filename);
         var blob = new Blob([html], {type:"text/html;charset=utf-8"});
         var url  = URL.createObjectURL(blob);
@@ -451,6 +468,10 @@ function buildExportHTML(payloadJson, filename) {
     p.push('var consolTTNodeIds     = new Set(_PL.ttIds);');
     p.push('var fitasNodeIds        = new Set(_PL.fitIds);');
     p.push('var aaPaperNodeIds      = new Set(_PL.aaIds);');
+    // *** new | FAST/GIRO node-membership sets so the Data Sources panel in
+    // the exported HTML shows the same 6 rows as the main app.
+    p.push('var fastNodeIds         = new Set(_PL.fastIds||[]);');
+    p.push('var giroNodeIds         = new Set(_PL.giroIds||[]);');
     p.push('var consolTTSelfLoopIds = new Set(_PL.ttself);');
     p.push('var fitasSelfLoopIds    = new Set(_PL.fitself);');
     p.push('var aaPaperSelfLoopIds  = new Set(_PL.aaself);');
@@ -725,6 +746,7 @@ function buildExportHTML(payloadJson, filename) {
     p.push('  var hasFITAS=fitasSelfLoopPresent||(!!fitasSummary&&((fitasSummary.fitas_ord_freq||0)>0||(fitasSummary.fitas_bene_freq||0)>0));');
     p.push('  var hasAllTxn=hasFITAS||hasPayment;');
     p.push('  var hasRSME=rsmeNodeIds.has(id),hasAAPaper=aaPaperNodeIds.has(id),hasTT=consolTTNodeIds.has(id);');
+    p.push('  var hasFAST=fastNodeIds.has(id),hasGIRO=giroNodeIds.has(id);');
     p.push('  var isMaybank=(ntype!=="Non-Maybank Customer"),isTrade=(ntype==="Maybank Trade Customer");');
     p.push('  var accS=getAccStates();');
     p.push('  var entityName=idNameLookup[id]||uid;');
@@ -732,12 +754,16 @@ function buildExportHTML(payloadJson, filename) {
     p.push('  var overviewContent="<table class=\'info-table\'>"+tSection("Entity Info")+tRow("UEN",uid)+');
     p.push('  Object.keys(fieldConfig).filter(function(k){return fieldConfig[k].section==="overview";}).map(function(k){return renderRow(k,meta);}).join("")+"<\/table>";');
 
+    // Data Sources panel: 6 rows in the same order/colors as the main app
+    // (js_sidepanel.py:683-700) -- RSME, AA Paper, FITAS, TT, FAST, GIRO.
     p.push('  var dsContent="<table class=\'info-table\' style=\'margin-top:4px;\'>"+');
     p.push('  "<tr style=\'background:#f5f5f5;\'><td class=\'lbl\' style=\'font-weight:700;color:#333;\'>Source<\/td><td class=\'val\'> <\/td><\/tr>"+');
-    p.push('  "<tr><td class=\'lbl\'>RSME Buyer/Supplier<\/td><td class=\'val\' style=\'color:"+(hasRSME?"#27ae60":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasRSME?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
-    p.push('  "<tr><td class=\'lbl\'>TT<\/td><td class=\'val\' style=\'color:"+(hasTT?"#2980b9":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasTT?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
+    p.push('  "<tr><td class=\'lbl\'>RSME Buyer/Supplier Checklist<\/td><td class=\'val\' style=\'color:"+(hasRSME?"#27ae60":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasRSME?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
+    p.push('  "<tr><td class=\'lbl\'>AA Paper<\/td><td class=\'val\' style=\'color:"+(hasAAPaper?"#8b4513":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasAAPaper?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
     p.push('  "<tr><td class=\'lbl\'>FITAS<\/td><td class=\'val\' style=\'color:"+(hasFITAS?"#6f42c1":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasFITAS?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
-    p.push('  "<tr><td class=\'lbl\'>AA Paper<\/td><td class=\'val\' style=\'color:"+(hasAAPaper?"#8b4513":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasAAPaper?"&#10003;":"&#8212;")+"<\/td><\/tr><\/table>";');
+    p.push('  "<tr><td class=\'lbl\'>TT<\/td><td class=\'val\' style=\'color:"+(hasTT?"#2980b9":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasTT?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
+    p.push('  "<tr><td class=\'lbl\'>FAST<\/td><td class=\'val\' style=\'color:"+(hasFAST?"#1A5276":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasFAST?"&#10003;":"&#8212;")+"<\/td><\/tr>"+');
+    p.push('  "<tr><td class=\'lbl\'>GIRO<\/td><td class=\'val\' style=\'color:"+(hasGIRO?"#1E8449":"#bbb")+";font-size:15px;font-weight:700;\'>"+(hasGIRO?"&#10003;":"&#8212;")+"<\/td><\/tr><\/table>";');
 
     p.push('  var paymentSummaryContent="";');
     p.push('  if(hasPayment){var payHasExt=!!paymentSummary&&((paymentSummary.payment_ord_freq||0)>0||(paymentSummary.payment_bene_freq||0)>0);');
@@ -871,7 +897,7 @@ function buildExportHTML(payloadJson, filename) {
     p.push('  if(!rsmeNbs.length)rsmeNetC="<p style=\'color:#aaa;font-size:12px;text-align:center;margin-top:8px;\'>No RSME connections.<\/p>";');
     p.push('  else rsmeNbs.forEach(function(nb){rsmeNetC+=_nbCard("nbcard-rsme-"+nb,nb,getTypeColor(TYPES[nb]||"Non-Maybank Customer"));});');
     p.push('  var ttNetC="";');
-    p.push('  if(!ttOutNbs.length&&!ttInNbs.length)ttNetC="<p style=\'color:#aaa;font-size:12px;text-align:center;margin-top:8px;\'>No TT connections.<\/p>";');
+    p.push('  if(!ttOutNbs.length&&!ttInNbs.length)ttNetC="<p style=\'color:#aaa;font-size:12px;text-align:center;margin-top:8px;\'>No Payment connections.<\/p>";');
     p.push('  else{if(ttOutNbs.length){ttNetC+="<div style=\'font-size:12px;font-weight:600;color:#2980b9;margin:8px 0 4px;\'>&#8594; Sends to ("+ttOutNbs.length+")<\/div>";ttOutNbs.forEach(function(nb){ttNetC+=_nbCard("nbcard-ttout-"+nb,nb,getTypeColor(TYPES[nb]||"Non-Maybank Customer"));});}');
     p.push('    if(ttInNbs.length){ttNetC+="<div style=\'font-size:12px;font-weight:600;color:#27ae60;margin:8px 0 4px;\'>&#8592; Receives from ("+ttInNbs.length+")<\/div>";ttInNbs.forEach(function(nb){ttNetC+=_nbCard("nbcard-ttin-"+nb,nb,getTypeColor(TYPES[nb]||"Non-Maybank Customer"));});}}');
     p.push('  var fitNetC="";');

@@ -16,8 +16,9 @@ class VizConfig:
     Edge architecture (pairRelationshipMap -- single source of truth):
     - RSME-only  : solid green (#2f8744), straight line, no arrow
     - directed   : solid blue, straight line, single arrow at to
+                   (covers Payment combined + FITAS + AA Paper directed)
     - both-ways  : solid blue, straight line, arrows both ends
-    - selfloop   : blue loop (TT self-transfer)
+    - selfloop   : blue loop (All-Txn / Payment-combined self-transfer)
 
     All consolidated edges use smooth: {enabled: false} (straight lines).
     rsme_edge_smooth / rsme_edge_smooth_type / rsme_edge_smooth_roundness
@@ -57,8 +58,10 @@ class VizConfig:
     rsme_edge_smooth_type       = "curvedCCW"
     rsme_edge_smooth_roundness  = 0.07
 
-    # ── Directed / both-ways edges (TT, FITAS, AA Paper) ─────────────────────
+    # ── Directed / both-ways edges (Payment combined + FITAS + AA Paper) ─────
     # Blue, straight line, arrow direction from pairRelationshipMap.ib flag.
+    # Constant prefix `consol_tt_edge_*` is legacy -- now applied to all
+    # directed edge classes (Payment, FITAS, AA Paper), not just TT.
     consol_tt_edge_color             = "#2980b9"
     consol_tt_edge_opacity           = 0.6
     consol_tt_edge_highlight_color   = "#2980b9"

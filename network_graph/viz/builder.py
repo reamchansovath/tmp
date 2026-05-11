@@ -41,9 +41,24 @@ class HTMLBuilder:
     Architecture:
     - NO PyVis, NO NetworkX, NO neighbor cache
     - Physics permanently disabled -- layoutRadialTree handles positioning
-    - Undirected edges : RSME + AA Paper + FITAS combined, CCW roundness 0.75
-    - Directed edges   : TT net flow, CW roundness 1.5, arrow to net receiver
-    - Self-loop edges  : TT self-transfers
+    - Render-time edge classification (driven by pairRelationshipMap built
+      in js_core.py from relationship_df):
+        * RSME-only  : pair appears in RSME AND NOT in payment/FITAS/AA.
+                       Rendered green, straight, NO arrow.
+                       (`ro` flag; see js_core.py rsme_only logic.)
+        * both-ways  : `is_both=True` from RelationshipBuilder.
+                       Blue, straight, arrows on both ends. (`ib` flag.)
+        * directed   : everything else (FITAS, AA Paper, Payment combined =
+                       TT+FAST+GIRO, or any mix). Blue, straight, single
+                       arrow at "to". Per-source TT / FITAS directed sets
+                       are also produced for the side-panel breakdowns.
+        * self-loop  : All-Txn (Payment combined + FITAS) self-transfers,
+                       with per-source FITAS / Payment / TT lookup maps
+                       for the side panel.
+    - The build-time `undirected_edges_df` is a pair-symmetric aggregation
+      table (keyed by frozenset({src, tgt})), NOT the set of rendered
+      undirected edges -- that distinction is decided later by the
+      RSME-only flag in pairRelationshipMap.
     - UEN compression  : internal data uses short string IDs, external API
                          always uses real UEN strings
     """
@@ -109,7 +124,11 @@ class HTMLBuilder:
         fitas_node_summary_js     : dict  FITAS transaction summary per node
         consol_tt_metric_ranges   : dict  TT metric ranges for node sizing
         fitas_metric_ranges       : dict  FITAS metric ranges for node sizing
-        undirected_edges_js       : list  consolidated RSME/AA/FITAS edge dicts
+        undirected_edges_js       : list  pair-symmetric aggregation table
+                                          (RSME + AA + FITAS counts, keyed
+                                          by sorted-pair). Render-time class
+                                          is decided by pairRelationshipMap
+                                          flags, NOT by membership here.
         directed_edges_js         : list  TT net flow edge dicts
         selfloop_edges_js         : list  TT self-transfer dicts
         logo_b64                  : str, optional  base64-encoded logo
@@ -213,6 +232,8 @@ class HTMLBuilder:
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Corporate Network Graph - Maybank</title>
+    <!-- Poppins-700 only -- used for the M-EXT wordmark to match Recipe 4 RM report. -->
+    <link href="https://fonts.googleapis.com/css2?family=Poppins:wght@700&display=swap" rel="stylesheet">
     <script src="https://unpkg.com/vis-network@9.1.2/dist/vis-network.min.js"></script>
     <style>
         body {{

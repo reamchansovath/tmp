@@ -227,11 +227,15 @@ class Enricher:
         df     = self._load_file(self.enrichment_folder, cfg.ENRICHMENT_FILES['credit_summary'])
         rename = cfg.CREDIT_SUMMARY_RENAME
         cols   = ['CIF_NO'] + [c for c in rename if c in df.columns]
+        # *** fix | strip CIF_NO BEFORE drop_duplicates. Previously the order
+        # was rename -> dedup -> strip, so ' 12345' and '12345' both survived
+        # dedup and were then both stripped to '12345', creating duplicate
+        # keys for the downstream merge in enrich().
         self._credit_clean = (
             df[cols]
             .rename(columns=rename)
-            .drop_duplicates(subset='CIF_NO', keep='first')
             .assign(CIF_NO=lambda x: x['CIF_NO'].astype(str).str.strip())
+            .drop_duplicates(subset='CIF_NO', keep='first')
         )
         print(f"  credit_clean: {len(self._credit_clean):,} rows")
 
@@ -250,6 +254,12 @@ class Enricher:
     def _load_acra_entity(self):
         """Load the ACRA entity info (entity name, type, status, postal code, SSIC)."""
         self._acra_df = self._load_file(self.acra_folder, self.config.FILE_ACRA)
+        # *** fix | normalize uen column so the merge in enrich() against the
+        # left-side .strip().upper() succeeds for whitespace / case variants.
+        if 'uen' in self._acra_df.columns:
+            self._acra_df['uen'] = (
+                self._acra_df['uen'].astype(str).str.strip().str.upper()
+            )
         self._acra_df['postal_code'] = (
             self._acra_df['postal_code'].astype(str).str.zfill(6)
         )
@@ -309,9 +319,7 @@ class Enricher:
         rename = {k: v for k, v in cfg.EMIS_RENAME.items() if k in df.columns}
         df = df.rename(columns=rename)
 
-        for col in cfg.EMIS_NUMERIC_COLS:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        self._coerce_numeric(df, cfg.EMIS_NUMERIC_COLS)
 
         if 'EMIS Fiscal Year' in df.columns:
             df = df.sort_values('EMIS Fiscal Year', ascending=False, na_position='last')
@@ -320,7 +328,9 @@ class Enricher:
         self._emis_patch_cols = [c for c in df.columns if c not in join_keys]
 
         if 'UEN' in df.columns:
-            df['UEN'] = df['UEN'].astype(str).str.strip()
+            # *** fix | uppercase + strip to match the left-side normalization
+            # in enrich() and the convention used by ACRA charges / MFI / CIP.
+            df['UEN'] = df['UEN'].astype(str).str.strip().str.upper()
             self._emis_new_map = (
                 df.dropna(subset=['UEN'])
                 .drop_duplicates(subset=['UEN'], keep='first')
@@ -331,7 +341,7 @@ class Enricher:
             self._emis_new_map = pd.DataFrame(columns=self._emis_patch_cols)
 
         if 'UEN_Old' in df.columns:
-            df['UEN_Old'] = df['UEN_Old'].astype(str).str.strip()
+            df['UEN_Old'] = df['UEN_Old'].astype(str).str.strip().str.upper()
             self._emis_old_map = (
                 df.dropna(subset=['UEN_Old'])
                 .drop_duplicates(subset=['UEN_Old'], keep='first')
@@ -382,15 +392,11 @@ class Enricher:
         df = df[cols_present].copy()
         df['UEN'] = df['UEN'].astype(str).str.strip().str.upper()
 
-        for col in ('N_CHARGES', 'N_UNIQUE_CHARGEE',
-                    'CHARGE_ALLMONIESOWING_Y_COUNT', 'CHARGE_ALLMONIESOWING_N_COUNT'):
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        if 'CHARGE_SECURED_AMOUNT_SGD' in df.columns:
-            df['CHARGE_SECURED_AMOUNT_SGD'] = pd.to_numeric(
-                df['CHARGE_SECURED_AMOUNT_SGD'], errors='coerce'
-            )
+        self._coerce_numeric(df, [
+            'N_CHARGES', 'N_UNIQUE_CHARGEE',
+            'CHARGE_ALLMONIESOWING_Y_COUNT', 'CHARGE_ALLMONIESOWING_N_COUNT',
+            'CHARGE_SECURED_AMOUNT_SGD',
+        ])
 
         for col in ('EARLIEST_CHARGE_REG_DATE', 'LATEST_CHARGE_REG_DATE'):
             if col in df.columns:
@@ -469,17 +475,13 @@ class Enricher:
         else:
             df = df.drop_duplicates(subset='UEN', keep='first')
 
-        # Numeric casts
-        for col in cfg.MFI_NUMERIC_COLS:
-            raw_col = {v: k for k, v in cfg.MFI_RENAME.items()}.get(col, col)
-            if raw_col in df.columns:
-                df[raw_col] = pd.to_numeric(df[raw_col], errors='coerce')
-
-        # Ratio cols (float, not rounded)
-        for col in cfg.MFI_RATIO_COLS:
-            raw_col = {v: k for k, v in cfg.MFI_RENAME.items()}.get(col, col)
-            if raw_col in df.columns:
-                df[raw_col] = pd.to_numeric(df[raw_col], errors='coerce')
+        # Numeric + ratio casts (ratios stay float, not rounded)
+        _inv_rename = {v: k for k, v in cfg.MFI_RENAME.items()}
+        _raw_cols = [
+            _inv_rename.get(c, c)
+            for c in (list(cfg.MFI_NUMERIC_COLS) + list(cfg.MFI_RATIO_COLS))
+        ]
+        self._coerce_numeric(df, _raw_cols)
 
         # Rename all columns using MFI_RENAME (excludes UEN)
         rename = {k: v for k, v in cfg.MFI_RENAME.items() if k in df.columns}
@@ -526,14 +528,8 @@ class Enricher:
             print(f"  cip: missing columns {missing_cip} -- will be null")
         df = df[cols_to_keep].copy()
 
-        # Numeric casts
-        for col in cfg.CIP_NUMERIC_COLS:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
-
-        for col in cfg.CIP_INT_COLS:
-            if col in df.columns:
-                df[col] = pd.to_numeric(df[col], errors='coerce')
+        # Numeric casts (CIP amounts + integer counts both go through to_numeric)
+        self._coerce_numeric(df, list(cfg.CIP_NUMERIC_COLS) + list(cfg.CIP_INT_COLS))
 
         # Date cols -- parse to datetime then store as string YYYY-MM-DD
         # clean_date() will handle display formatting
@@ -548,6 +544,19 @@ class Enricher:
         )
         print(f"  cip_clean: {len(self._cip_clean):,} rows  "
               f"({len(self._cip_clean.columns)} cols)")
+
+    @staticmethod
+    def _coerce_numeric(df: pd.DataFrame, cols) -> pd.DataFrame:
+        """
+        In-place coerce each named column to numeric (errors->NaN).
+        Skips columns not present in df. Returns the same df for chaining.
+        Replaces the per-column `pd.to_numeric` loops scattered through
+        every _load_* method.
+        """
+        for c in cols:
+            if c in df.columns:
+                df[c] = pd.to_numeric(df[c], errors='coerce')
+        return df
 
     @staticmethod
     def _pad_ssic(series: pd.Series) -> pd.Series:
@@ -577,6 +586,14 @@ class Enricher:
         """
         df = nodes_df.copy()
         df[cif_col] = df[cif_col].astype(str).str.strip()
+        # *** fix | normalize left-side UEN once. Without this, merges
+        # against ACRA / EMIS / charges / MFI / CIP (all keyed on UEN)
+        # silently drop matches when the left UEN has whitespace or
+        # mixed case — the right side was already normalized at load time
+        # but the left was not. Strip + uppercase mirrors the right-side
+        # invariant established in _load_acra_charges / _load_mfi /
+        # _load_cip / _load_acra_entity.
+        df[uen_col] = df[uen_col].astype(str).str.strip().str.upper()
 
         # ── Step 1: CIF_SEGM_MSTR enrichment (primary: CIF, fallback: UEN) ──
         df = df.merge(
@@ -591,9 +608,18 @@ class Enricher:
             else pd.Series(True, index=df.index)
         )
         if missing.any():
-            uen_lookup = self._cif_segm_mstr.rename(
-                columns={c: c + '_uen'
-                         for c in self._cif_segm_mstr.columns if c != 'ID_CODE'}
+            # *** fix | dedup on ID_CODE before the UEN-keyed fallback merge.
+            # `_cif_segm_mstr` was already deduped on CIF_NO, but the same
+            # ID_CODE (UEN) can map to multiple CIFs, which would fan out
+            # rows on a left-join. Take the first match per ID_CODE.
+            uen_lookup = (
+                self._cif_segm_mstr
+                .dropna(subset=['ID_CODE'])
+                .drop_duplicates(subset='ID_CODE', keep='first')
+                .rename(columns={
+                    c: c + '_uen'
+                    for c in self._cif_segm_mstr.columns if c != 'ID_CODE'
+                })
             )
             df = df.merge(uen_lookup, left_on=uen_col, right_on='ID_CODE', how='left')
             for col in self._cif_segm_mstr.columns:
@@ -731,7 +757,10 @@ class Enricher:
                         [c for c in df.columns if c.endswith('_charges')],
                 errors='ignore'
             )
-            n_matched = df['N_CHARGES'].notna().sum()
+            # *** fix | guard column access -- N_CHARGES might not be in the
+            # source if ACRA_CHARGES_COLS was misconfigured.
+            n_matched = (df['N_CHARGES'].notna().sum()
+                         if 'N_CHARGES' in df.columns else 0)
             print(f"  acra_charges: {n_matched:,} / {len(df):,} nodes matched")
         else:
             print("  acra_charges: not loaded -- skipped")
@@ -801,6 +830,44 @@ class Enricher:
         except: return None
 
     @staticmethod
+    def round_amount_columns(df):
+        """
+        Round any column ending in `_amt` to whole units (int-like) and any
+        ending in `_amt_pct` to 1 decimal place. Modifies in place. Skips
+        non-numeric / boolean columns. Returns the same df for chaining.
+
+        Why: amount fields ship as full-precision floats in JSON
+        (`12345.67890123`), wasting bytes. Rounding here means every
+        downstream `to_dict()` emits compact values.
+        """
+        if df is None or len(df) == 0:
+            return df
+        for col in df.columns:
+            if not isinstance(col, str):
+                continue
+            if not (col.endswith('_amt') or col.endswith('_amt_pct')):
+                continue
+            # *** fix | post-merge with nulls, an amount column often ends
+            # up object dtype. Coerce to numeric first (errors->NaN) so
+            # rounding still applies. Bool dtype skipped because rounding
+            # bools is meaningless.
+            if df[col].dtype == bool:
+                continue
+            if df[col].dtype == object:
+                coerced = pd.to_numeric(df[col], errors='coerce')
+                # Only adopt the coerced column if at least one value parsed;
+                # otherwise the column was genuinely non-numeric strings.
+                if coerced.notna().any():
+                    df[col] = coerced
+                else:
+                    continue
+            if col.endswith('_amt_pct'):
+                df[col] = df[col].round(1)
+            else:
+                df[col] = df[col].round(0)
+        return df
+
+    @staticmethod
     def clean_int(val):
         if val is None or val is pd.NA: return None
         if isinstance(val, float) and math.isnan(val): return None
@@ -825,17 +892,23 @@ class Enricher:
             pass
 
         if hasattr(val, 'strftime'):
+            # Strip tz so '%d %b %Y' formatting doesn't shift across zones.
+            if hasattr(val, 'tzinfo') and val.tzinfo is not None:
+                try:
+                    val = val.replace(tzinfo=None)
+                except Exception:
+                    pass
             return val.strftime('%d %b %Y')
 
         s = str(val).strip()
         if not s or s in ('nan', 'None', 'NaT', ''):
             return None
 
-        # Format 1: SAS datetime  02NOV2004:00:00:00
+        # Format 1: SAS datetime  02NOV2004:00:00:00 (lowercase month tolerated)
         if ':' in s and len(s) > 9:
             try:
                 return pd.to_datetime(
-                    s.split(':')[0].strip(), format='%d%b%Y'
+                    s.split(':')[0].strip().title(), format='%d%b%Y'
                 ).strftime('%d %b %Y')
             except Exception:
                 pass
@@ -847,10 +920,10 @@ class Enricher:
             except Exception:
                 pass
 
-        # Format 3: Simple SAS date  28FEB2026
+        # Format 3: Simple SAS date  28FEB2026 (lowercase month tolerated)
         if len(s) == 9 and s[2:5].isalpha():
             try:
-                return pd.to_datetime(s, format='%d%b%Y').strftime('%d %b %Y')
+                return pd.to_datetime(s.title(), format='%d%b%Y').strftime('%d %b %Y')
             except Exception:
                 pass
 
@@ -872,6 +945,14 @@ class Enricher:
             return pd.to_datetime(s).strftime('%d %b %Y')
         except Exception:
             return s
+
+    @staticmethod
+    def clean_ratio(val):
+        """For ratio cols (e.g. MFI DCSR / Gearing) -- plain decimal at 2dp."""
+        if val is None or val is pd.NA: return None
+        if isinstance(val, float) and math.isnan(val): return None
+        try:    return round(float(val), 2)
+        except: return None
 
     @staticmethod
     def clean_string(val):

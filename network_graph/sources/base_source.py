@@ -20,6 +20,11 @@ class BaseSource(ABC):
     - An edge table with at minimum: SOURCE_UEN, TARGET_UEN, edge_source
     """
 
+    # Canonical "this is not a real ID" set. Hoisted from per-file _INVALID_IDS
+    # constants in every source/pipeline module. Use via BaseSource.INVALID_IDS
+    # (or import the package-level alias from `network_graph`).
+    INVALID_IDS = frozenset({'', 'nan', 'none', 'None', 'NaN', 'NAN'})
+
     def __init__(self, config, main_folder, acra_folder=None):
         self.config      = config
         self.main_folder = main_folder
@@ -70,10 +75,25 @@ class BaseSource(ABC):
 
     @staticmethod
     def _clean_id(series: pd.Series) -> pd.Series:
-        """Strip whitespace and remove HTML entities from ID columns."""
+        """
+        Strip whitespace and remove HTML entities from ID columns.
+
+        *** fix | when an ID column comes in as numeric (int64/float64),
+        plain `astype(str)` produces "12345" for ints but "12345.0" for
+        floats -- breaking joins against string-typed UEN columns elsewhere.
+        Coerce floats to int representation when the value is whole, and
+        keep the rest as plain strings.
+        """
+        if pd.api.types.is_float_dtype(series):
+            # Whole-number floats -> ints; NaN -> '' (downstream filters drop)
+            cleaned = series.where(
+                series.isna(),
+                series.fillna(0).astype('Int64')
+            ).astype(str).str.replace('<NA>', '', regex=False)
+        else:
+            cleaned = series.astype(str)
         return (
-            series
-            .astype(str)
+            cleaned
             .str.strip()
             .str.replace('&#8206;', '', regex=False)
         )

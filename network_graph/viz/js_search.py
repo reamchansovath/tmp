@@ -452,7 +452,8 @@ function layoutRadialTree(nodeIds, centerIds, maxHops, depthMap) {
 // URL-BASED SEARCH ON PAGE LOAD
 // ══════════════════════════════════════════════════════════════════════════
 
-(function() {
+// Defer until __bootstrapReady so companyList / _ItoU (used by _d) exist.
+__bootstrapReady.then(function() {
     try {
         if (typeof URLSearchParams === 'undefined') return;
         var params = new URLSearchParams(window.location.search);
@@ -485,5 +486,5 @@ function layoutRadialTree(nodeIds, centerIds, maxHops, depthMap) {
     } catch(e) {
         console.error("URL parameter loading error:", e);
     }
-})();
+});
 """

@@ -8,7 +8,7 @@
 import pandas as pd
 from .base_source import BaseSource
 
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+_INVALID_IDS = BaseSource.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 # Products where the customer (SOURCE) is acting as Buyer
 FITAS_BUYER_PRODUCTS    = {'LC', 'TR', 'STA'}
@@ -138,20 +138,31 @@ class FITASSource(BaseSource):
         """
         df = self.combined_df.copy()
 
-        # Step 1: dedup by REF_NO -- prefer Buyer row for canonical direction
+        # Step 1: dedup by REF_NO -- prefer Buyer row for canonical direction.
+        # *** fix | only dedup rows that have a non-null REF_NO. Pandas
+        # treats NaN == NaN under drop_duplicates, so a frame with many
+        # null-REF_NO rows would collapse them all to one even though they
+        # represent unrelated trades. Split, dedup the keyed slice, keep
+        # the unkeyed slice as-is, recombine.
         if 'REF_NO' in df.columns:
             before_dedup = len(df)
             df['_is_buyer'] = (
                 df['CUST_TRADE_ROLE'].astype(str).str.strip().str.upper() == 'BUYER'
             ).astype(int)
+            keyed   = df[df['REF_NO'].notna()]
+            unkeyed = df[df['REF_NO'].isna()]
+            keyed_dedup = (
+                keyed.sort_values('_is_buyer', ascending=False)
+                     .drop_duplicates(subset='REF_NO', keep='first')
+            )
             df = (
-                df.sort_values('_is_buyer', ascending=False)
-                  .drop_duplicates(subset='REF_NO', keep='first')
+                pd.concat([keyed_dedup, unkeyed], ignore_index=True)
                   .drop(columns='_is_buyer')
                   .reset_index(drop=True)
             )
             print(f"  FITAS REF_NO dedup: {before_dedup:,} -> {len(df):,} rows "
-                  f"({before_dedup - len(df):,} duplicate perspectives removed)")
+                  f"({before_dedup - len(df):,} duplicate perspectives removed; "
+                  f"{len(unkeyed):,} null-REF_NO rows kept verbatim)")
 
         # Step 2: assign SOURCE/TARGET based on CUST_TRADE_ROLE
         # Supplier rows flip the pair so buyer is always SOURCE
@@ -178,6 +189,14 @@ class FITASSource(BaseSource):
             ~df['TARGET_UEN'].isin(_INVALID_IDS)
         )
         df_valid = df[valid_mask].copy()
+        # *** fix | coerce LCY_TRADE_AMT to numeric so groupby.sum() doesn't
+        # silently produce NaN if the column comes in object dtype.
+        if 'LCY_TRADE_AMT' in df_valid.columns:
+            df_valid['LCY_TRADE_AMT'] = pd.to_numeric(
+                df_valid['LCY_TRADE_AMT'], errors='coerce'
+            )
+        else:
+            df_valid['LCY_TRADE_AMT'] = 0.0
 
         # Step 3: product breakdown -- excludes self-loops so relationship
         # builder only sees external pair data
@@ -243,10 +262,12 @@ class FITASSource(BaseSource):
                 self.out_adj.setdefault(src, []).append(tgt)
                 self.in_adj.setdefault(tgt, []).append(src)
 
+        # *** fix | unique-counterparty count: |out_adj ∪ in_adj|.
+        # See consol_tt_source.py for rationale. Same semantics as _fitas_deg
+        # in Recipe_1_Pipeline.py.
         for nid in self.active_uens:
-            self.degree_map[nid] = (
-                len(self.out_adj.get(nid, [])) +
-                len(self.in_adj.get(nid, []))
+            self.degree_map[nid] = len(
+                set(self.out_adj.get(nid, [])) | set(self.in_adj.get(nid, []))
             )
 
     def get_nodes(self) -> pd.DataFrame:

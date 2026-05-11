@@ -5,6 +5,8 @@
 import json
 import re
 import math
+import gzip
+import base64
 import pandas as pd
 from ..pipeline.enricher import Enricher
 
@@ -49,6 +51,27 @@ class JSPayloadBuilder:
             json.dumps(_clean(obj), ensure_ascii=True)
             .replace('</', '<\\/')
         )
+
+    @staticmethod
+    def safe_json_gz(obj) -> tuple:
+        """
+        Like safe_json() but gzip-compresses the result and returns it as a
+        base64 ASCII string -- safe to embed inside a JS string literal.
+
+        Returns (b64_string, raw_size_bytes, gz_size_bytes) so the caller can
+        log compression ratios.
+
+        On the JS side, decompress with the browser's native DecompressionStream
+        API (Chrome 80+, Firefox 113+, Safari 16.4+, Edge 80+). See the
+        _decompressJSON helper emitted by js_core.py.
+        """
+        # Reuse the same cleaning pipeline as safe_json so behaviour is
+        # consistent (control-char stripping, pd.NA handling, ASCII escaping).
+        json_str  = JSPayloadBuilder.safe_json(obj)
+        raw_bytes = json_str.encode('utf-8')
+        gz_bytes  = gzip.compress(raw_bytes, compresslevel=6)
+        b64_str   = base64.b64encode(gz_bytes).decode('ascii')
+        return b64_str, len(raw_bytes), len(gz_bytes)
 
     def build_node_meta(self, enriched_nodes_df: pd.DataFrame,
                         node_type_dict: dict) -> dict:
@@ -163,7 +186,18 @@ class JSPayloadBuilder:
             else:
                 # Passthrough -- includes EMIS % cols (ROA, ROE) which are
                 # already cast to float in enricher._load_emis() and
-                # rendered by fmtVal() in JS without special formatting
-                cleaned[k] = None if val is None else val
+                # rendered by fmtVal() in JS without special formatting.
+                # Defensive isna() guard catches pd.NaT / numpy datetime64
+                # NaT / nan that could leak through if a date value lands in
+                # a non-DATE_COLS column. Without this, the column-encoder
+                # would treat each NaT as a unique dict key (since NaT != NaT)
+                # and blow the dictionary on a sparse column.
+                if val is None:
+                    cleaned[k] = None
+                else:
+                    try:
+                        cleaned[k] = None if pd.isna(val) else val
+                    except (TypeError, ValueError):
+                        cleaned[k] = val
 
         return cleaned

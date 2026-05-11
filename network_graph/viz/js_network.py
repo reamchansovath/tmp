@@ -12,7 +12,9 @@
 #       e.fr=from  e.to=to  e.ro=rsmeOnly  e.ib=isBoth  e.wb=width
 #       e.ir=inRsme  e['if']=inFitas  e.ia=inAA  e.it=inTT
 #     ('if' requires bracket notation -- reserved word in JS)
-# - selfLoopEdgesData : TT self-transfers, injected separately, unchanged
+# - selfLoopEdgesData : All-Txn (Payment ∪ FITAS) self-transfers, injected
+#                       separately. Aliased from data.allTxnSelfLoopEdgesData
+#                       at bootstrap (see js_core.py).
 # - consolidatedEdgesData removed entirely
 #
 # EDGE COLORS (updated):
@@ -217,9 +219,9 @@ function ensureAllNetworksInVis() {
             _tt_ba_amt      : e._tt_ba_amt      || 0,
             _tt_total_count : e._tt_total_count || 0,
             _tt_net_amt     : e._tt_net_amt     || 0,
-            _baseWidth      : e.wb || 1,
+            _baseWidth      : e.wb || 2.5,
             color           : edgeColor,
-            width           : e.wb || 1,
+            width           : e.wb || 2.5,
             arrows          : arrowConfig,
             smooth          : {enabled: false},
             // *** updated | dashes:false for all edges including RSME-only (now green solid)
@@ -230,11 +232,19 @@ function ensureAllNetworksInVis() {
     });
     if (consolidatedToAdd.length > 0) edges.add(consolidatedToAdd);
 
-    // ── Add self-loop edges (TT self-transfers) ───────────────────────────
+    // ── Add self-loop edges (All-Txn = Payment ∪ FITAS self-transfers) ────
+    // *** fix | _inPayment / _inFitas now reflect actual source presence
+    // (paymentSelfLoopIds / fitasSelfLoopIds), so the source filter in
+    // js_filters.py shows a self-loop ONLY when the matching source is on.
+    // Previously _inPayment was hard-coded true and _inFitas absent, so a
+    // FITAS-only self-transfer would show up under the Payment filter and
+    // vice versa.
     var selfLoopToAdd = [];
     selfLoopEdgesData.forEach(function(e) {
         var eid = "selfloop_" + e.uen;
         if (existingEids.has(eid)) return;
+        var hasPay = (typeof paymentSelfLoopIds !== "undefined") && paymentSelfLoopIds.has(e.uen);
+        var hasFit = (typeof fitasSelfLoopIds   !== "undefined") && fitasSelfLoopIds.has(e.uen);
         selfLoopToAdd.push({
             id           : eid,
             from         : e.uen,
@@ -242,16 +252,17 @@ function ensureAllNetworksInVis() {
             _isSelfLoop  : true,
             _rsmeOnly    : false,
             _isBoth      : false,
-            _inPayment   : true,
+            _inPayment   : !!hasPay,
+            _inFitas     : !!hasFit,
             _all_txn_count : e._all_txn_count || 0,
             _all_txn_amt   : e._all_txn_amt   || 0,
-            _baseWidth   : 2,
+            _baseWidth   : 2.5,
             color        : {
                 color    : CFG.consol_tt_edge_color,
                 opacity  : CFG.consol_tt_edge_opacity,
                 highlight: CFG.consol_tt_edge_highlight_color,
             },
-            width        : 2,
+            width        : 2.5,
             arrows       : {to: {enabled: false}},
             selfReference: {size: 20, angle: Math.PI / 4},
             smooth       : {enabled: true, type: "curvedCW", roundness: 0.5},
@@ -263,7 +274,11 @@ function ensureAllNetworksInVis() {
     if (selfLoopToAdd.length > 0) edges.add(selfLoopToAdd);
 }
 
-ensureAllNetworksInVis();
+// Wait for compressed payloads (rsmeNodeIds, paymentNodeIds, fitasNodeIds,
+// aaPaperNodeIds, pairRelationshipMap, selfLoopEdgesData, nodeMetaMap,
+// nodeTypeMap, originalLabels) to be hydrated before injecting nodes/edges
+// into vis.js -- otherwise this throws TypeError on null.forEach().
+__bootstrapReady.then(ensureAllNetworksInVis);
 
 // ══════════════════════════════════════════════════════════════════════════
 // EDGE COLOR MANAGEMENT

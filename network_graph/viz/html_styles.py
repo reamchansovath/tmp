@@ -117,9 +117,9 @@ div.vis-network {{ border:none !important; }}
 
 /* ── Edge legend elements ─────────────────────────────────────────────────
    legend-line-rsme    : solid GREEN line, no arrow -- RSME-only pairs
-   legend-line-directed: solid blue line + single arrowhead -- FITAS/AA/TT
+   legend-line-directed: solid blue line + single arrowhead -- Payment / FITAS / AA Paper
    legend-line-both    : solid blue line + double arrowhead -- both ways
-   legend-line-selfloop: blue loop circle -- TT self-transfer
+   legend-line-selfloop: blue loop circle -- Payment-combined / All-Txn self-transfer
    ──────────────────────────────────────────────────────────────────── */
 
 /* *** updated | RSME-only: solid green, no arrow (was dashed blue) */
@@ -128,7 +128,7 @@ div.vis-network {{ border:none !important; }}
     border-top:2px solid {EDGE_GREEN};
     margin-right:0; vertical-align:middle; flex-shrink:0; }}
 
-/* Directed (FITAS/AA/TT): solid blue + single right arrow */
+/* Directed (Payment / FITAS / AA Paper): solid blue + single right arrow */
 .legend-line-directed {{
     display:inline-flex; align-items:center;
     margin-right:0; vertical-align:middle; flex-shrink:0; }}
@@ -304,19 +304,24 @@ div.vis-network {{ border:none !important; }}
 
 .tb-dropdown {{ position:relative; flex-shrink:0; }}
 
+/* Trigger styled to match .tb-btn (Reset / History / Export View) so the
+   filter dropdowns visually belong to the same control row. Only the
+   dropdown-specific bits remain: min-width for label stability, gap for
+   the chevron, and an .open indicator. */
 .tb-dd-trigger {{
     display:flex; align-items:center; gap:6px;
-    background:#2A2A2A; border:1px solid #3A3A3A; border-radius:6px;
-    color:#fff; font-size:12px; padding:0 10px; cursor:pointer;
-    height:30px; min-width:140px;
+    background:{BTN_BG}; color:{BTN_TEXT};
+    border:none; border-radius:5px;
+    font-size:11.5px; padding:0 10px; cursor:pointer;
+    height:28px; min-width:140px;
     font-family:Inter,'Segoe UI',Arial,sans-serif;
+    transition:background 0.15s; white-space:nowrap; flex-shrink:0;
 }}
-.tb-dd-trigger:hover {{ background:#333; }}
-.tb-dd-trigger.open {{ border-color:#A78BFA;
-    box-shadow:0 0 0 2px rgba(167,139,250,0.20); }}
-.tb-dd-icon {{ font-size:13px; opacity:0.85; flex-shrink:0; }}
-.tb-dd-label {{ flex:1; text-align:left; white-space:nowrap; }}
-.tb-dd-chevron {{ font-size:10px; color:#aaa; flex-shrink:0; }}
+.tb-dd-trigger:hover {{ background:#d0d0d0; }}
+.tb-dd-trigger.open  {{ background:#c0c0c0; }}
+.tb-dd-icon    {{ font-size:13px; opacity:0.85; flex-shrink:0; }}
+.tb-dd-label   {{ flex:1; text-align:left; white-space:nowrap; }}
+.tb-dd-chevron {{ font-size:10px; color:#555; flex-shrink:0; }}
 
 .tb-dd-panel {{
     display:none; position:absolute; top:calc(100% + 4px); left:0;
@@ -344,7 +349,7 @@ div.vis-network {{ border:none !important; }}
   <div id="toolbar-row">
     <span id="toolbar-brand">{logo_tag}
       <span style="margin-left:2px;margin-right:6px;">&#10022;</span>
-      <span style="color:{YELLOW};font-weight:700;font-size:17px;">M-EXT</span>
+      <span style="color:{YELLOW};font-family:'Poppins',Inter,sans-serif;font-weight:700;font-size:22px;letter-spacing:-0.5px;">M-EXT</span>
       <span style="color:#9A9A9A;font-weight:500;font-size:12px;margin-left:7px;letter-spacing:0.2px;">Maybank Ecosystem eXchange Topology</span>
     </span>
     <div class="tb-divider"></div>
@@ -363,7 +368,9 @@ div.vis-network {{ border:none !important; }}
       </div>
     </div>
 
-    <div class="tb-divider"></div>
+    <!-- Right-aligned cluster: margin-left:auto on the first divider pushes
+         Reset / undo / redo / History / Export View to the row's right edge. -->
+    <div class="tb-divider" style="margin-left:auto;"></div>
     <button id="reset-btn"     class="tb-btn">Reset</button>
     <button id="hist-back-btn" class="tb-btn" disabled>&#8635;</button>
     <button id="hist-fwd-btn"  class="tb-btn" disabled>&#8634;</button>
@@ -383,8 +390,7 @@ div.vis-network {{ border:none !important; }}
     <!-- Data Sources dropdown -->
     <div class="tb-dropdown" data-filter="sources">
       <button class="tb-dd-trigger" id="dd-sources-trigger" type="button">
-        <span class="tb-dd-icon">&#x26C1;</span>
-        <span class="tb-dd-label" id="dd-sources-label">All Sources</span>
+        <span class="tb-dd-label" id="dd-sources-label">Sources</span>
         <span class="tb-dd-chevron">&#9662;</span>
       </button>
       <div class="tb-dd-panel" id="dd-sources-panel">
@@ -398,8 +404,7 @@ div.vis-network {{ border:none !important; }}
     <!-- Countries dropdown -->
     <div class="tb-dropdown" data-filter="countries">
       <button class="tb-dd-trigger" id="dd-countries-trigger" type="button">
-        <span class="tb-dd-icon">&#x1F310;</span>
-        <span class="tb-dd-label" id="dd-countries-label">All Countries</span>
+        <span class="tb-dd-label" id="dd-countries-label">Countries</span>
         <span class="tb-dd-chevron">&#9662;</span>
       </button>
       <div class="tb-dd-panel" id="dd-countries-panel">

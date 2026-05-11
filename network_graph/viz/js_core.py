@@ -23,6 +23,8 @@
 # Use config.get_graph_fields() + config.SYSTEM_FIELDS to get allowed set.
 
 import math
+import gzip
+import base64
 import pandas as pd
 from .compression import (
     c_key, c_key_listval, c_list,
@@ -62,7 +64,9 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
 
     Edge data:
     - pairRelationshipMap : single source of truth, one entry per unique pair.
-    - selfLoopEdgesData   : TT self-transfers, injected separately.
+    - selfLoopEdgesData   : All-Txn (Payment combined + FITAS) self-transfers,
+                            injected separately. Per-source FITAS / Payment / TT
+                            lookup maps are also emitted for the side panel.
     """
 
     sj = safe_json
@@ -139,8 +143,14 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
     _payment_active  = (set(consol_tt_source.active_uens) |
                         set(fast_source.active_uens) |
                         set(giro_source.active_uens))
-    _payment_degree = {nid: (len(_payment_out_adj.get(nid, [])) + len(_payment_in_adj.get(nid, [])))
-                       for nid in _payment_active}
+    # *** fix | unique-counterparty count: |out_adj ∪ in_adj|, NOT len(out)+len(in)
+    # which would double-count bidirectional pairs. Currently `paymentDegreeMap`
+    # is dead JS payload (declared/hydrated, never read) but kept correct so
+    # any future feature reading it gets right values.
+    _payment_degree = {
+        nid: len(set(_payment_out_adj.get(nid, [])) | set(_payment_in_adj.get(nid, [])))
+        for nid in _payment_active
+    }
     _payment_node_ids = list(_payment_active)
     _fast_node_ids    = list(fast_source.active_uens)
     _giro_node_ids    = list(giro_source.active_uens)
@@ -276,7 +286,10 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
         except (TypeError, ValueError):
             return 0.0
 
-    def _bin_widths(amounts, min_w=1.0, max_w=8.0):
+    # min_w lifted from 1.0 to 2.5 so zero-/low-traffic pairs are still
+    # visible. Render width = _bin_widths floor or e.wb || min_w fallback
+    # in js_network.py -- keep both in sync.
+    def _bin_widths(amounts, min_w=2.5, max_w=8.0):
         arr      = [_safe_float(a) for a in amounts]
         log_amts = [math.log1p(max(a, 0.0)) for a in arr]
         lo       = min(log_amts)
@@ -333,66 +346,83 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
             undir_edge = _undir_lookup.get(map_key, {})
             dir_edge   = _dir_lookup.get(map_key,   {})
 
-            entry = {
-                'fr' : from_id,
-                'to' : to_id,
-                'ro' : rsme_only,
-                'wb' : 1.0,
-                'ps' : _safe_val(row.get('priority_source')),
-                'ib' : is_both,
-                'id' : bool(row.get('is_directed', True)),
-                'if' : in_fitas,
-                'ia' : in_aa,
-                'it' : in_tt,
-                'ir' : in_rsme,
-                'bu' : _compress_uen_field(row.get('buyer_uen')),
-                'su' : _compress_uen_field(row.get('supplier_uen')),
-                'cu' : _compress_uen_field(row.get('customer_uen')),
-                'cou': _compress_uen_field(row.get('counterparty_uen')),
-                'tb2sc': _safe_val(row.get('tt_buyer_to_supplier_count')),
-                'tb2sa': _safe_val(row.get('tt_buyer_to_supplier_amt')),
-                'tb2sp': _safe_val(row.get('tt_buyer_to_supplier_amt_pct')),
-                's2bc' : _safe_val(row.get('tt_supplier_to_buyer_count')),
-                's2ba' : _safe_val(row.get('tt_supplier_to_buyer_amt')),
-                's2bp' : _safe_val(row.get('tt_supplier_to_buyer_amt_pct')),
-                'ttc'  : _safe_val(row.get('tt_total_count')),
-                'tta'  : _safe_val(row.get('tt_total_amt')),
-                'fta'  : _safe_val(row.get('fitas_total_amt')),
-                'gta'  : _safe_val(row.get('all_txn_total_amt') or row.get('grand_total_amt')),
-                '_rsme_ab'        : undir_edge.get('_rsme_ab',        False),
-                '_rsme_ba'        : undir_edge.get('_rsme_ba',        False),
-                '_aa_ab'          : undir_edge.get('_aa_ab',          False),
-                '_aa_ba'          : undir_edge.get('_aa_ba',          False),
-                '_fitas_ab_count' : undir_edge.get('_fitas_ab_count', 0),
-                '_fitas_ab_amt'   : undir_edge.get('_fitas_ab_amt',   0),
-                '_fitas_ba_count' : undir_edge.get('_fitas_ba_count', 0),
-                '_fitas_ba_amt'   : undir_edge.get('_fitas_ba_amt',   0),
-                '_tt_ab_count'    : dir_edge.get('_tt_ab_count',    0),
-                '_tt_ab_amt'      : dir_edge.get('_tt_ab_amt',      0),
-                '_tt_ba_count'    : dir_edge.get('_tt_ba_count',    0),
-                '_tt_ba_amt'      : dir_edge.get('_tt_ba_amt',      0),
-                '_tt_total_count' : dir_edge.get('_tt_total_count', 0),
-                '_tt_net_amt'     : dir_edge.get('_tt_net_amt',     0),
-            }
+            # Null-strip: only emit truthy/non-zero/non-None values. JS
+            # consumers already use !!e.X / e.X || 0 / e.X > 0 patterns, so
+            # missing keys read identically to false/0. Saves ~50-70% of
+            # per-pair JSON for sparse pairs (e.g. RSME-only with no payment
+            # or FITAS activity).
+            entry = {'fr': from_id, 'to': to_id, 'wb': 1.0}
 
+            # Source-presence and topology flags -- emit only when True
+            if rsme_only:                                entry['ro'] = True
+            if is_both:                                  entry['ib'] = True
+            if bool(row.get('is_directed', True)):       entry['id'] = True
+            if in_rsme:                                  entry['ir'] = True
+            if in_fitas:                                 entry['if'] = True
+            if in_aa:                                    entry['ia'] = True
+            if in_tt:                                    entry['it'] = True
+            if bool(row.get('in_payment', False)):       entry['if_pay'] = True
+            if bool(row.get('in_fast',    False)):       entry['if_fa']  = True
+            if bool(row.get('in_giro',    False)):       entry['if_gi']  = True
+
+            # UEN refs / priority source -- emit only when not None
+            _ps  = _safe_val(row.get('priority_source'))
+            if _ps is not None: entry['ps'] = _ps
+            for _src_key, _ent_key in (
+                ('buyer_uen', 'bu'), ('supplier_uen', 'su'),
+                ('customer_uen', 'cu'), ('counterparty_uen', 'cou'),
+            ):
+                _v = _compress_uen_field(row.get(_src_key))
+                if _v is not None:
+                    entry[_ent_key] = _v
+
+            # Numeric stats helper -- emit only when non-None and non-zero
+            def _put_nz(k, v):
+                if v is not None and v != 0:
+                    entry[k] = v
+
+            # TT direction stats from relationship_df
+            _put_nz('tb2sc', _safe_val(row.get('tt_buyer_to_supplier_count')))
+            _put_nz('tb2sa', _safe_val(row.get('tt_buyer_to_supplier_amt')))
+            _put_nz('tb2sp', _safe_val(row.get('tt_buyer_to_supplier_amt_pct')))
+            _put_nz('s2bc',  _safe_val(row.get('tt_supplier_to_buyer_count')))
+            _put_nz('s2ba',  _safe_val(row.get('tt_supplier_to_buyer_amt')))
+            _put_nz('s2bp',  _safe_val(row.get('tt_supplier_to_buyer_amt_pct')))
+            _put_nz('ttc',   _safe_val(row.get('tt_total_count')))
+            _put_nz('tta',   _safe_val(row.get('tt_total_amt')))
+            _put_nz('fta',   _safe_val(row.get('fitas_total_amt')))
+            # gta is also read by the width-binning loop below via .get('gta',0)
+            _put_nz('gta',   _safe_val(row.get('all_txn_total_amt') or row.get('grand_total_amt')))
+
+            # Direction flags from undir_edge -- emit only when True
+            if undir_edge.get('_rsme_ab'): entry['_rsme_ab'] = True
+            if undir_edge.get('_rsme_ba'): entry['_rsme_ba'] = True
+            if undir_edge.get('_aa_ab'):   entry['_aa_ab']   = True
+            if undir_edge.get('_aa_ba'):   entry['_aa_ba']   = True
+
+            # FITAS undirected counts/amts -- emit only when non-zero
+            _put_nz('_fitas_ab_count', undir_edge.get('_fitas_ab_count') or 0)
+            _put_nz('_fitas_ab_amt',   undir_edge.get('_fitas_ab_amt')   or 0)
+            _put_nz('_fitas_ba_count', undir_edge.get('_fitas_ba_count') or 0)
+            _put_nz('_fitas_ba_amt',   undir_edge.get('_fitas_ba_amt')   or 0)
+
+            # Per-source aggregates (tt, fast, giro, payment, all_txn).
+            # Most pairs are single-source, so 4 of 5 prefixes' fields are
+            # all-zero and now omitted entirely.
             for _prefix in ('tt', 'fast', 'giro', 'payment', 'all_txn'):
-                entry[f'_{_prefix}_ab_count']    = _safe_val(row.get(f'{_prefix}_ab_count'))    or 0
-                entry[f'_{_prefix}_ab_amt']      = _safe_val(row.get(f'{_prefix}_ab_amt'))      or 0
-                entry[f'_{_prefix}_ba_count']    = _safe_val(row.get(f'{_prefix}_ba_count'))    or 0
-                entry[f'_{_prefix}_ba_amt']      = _safe_val(row.get(f'{_prefix}_ba_amt'))      or 0
-                entry[f'_{_prefix}_total_count'] = _safe_val(row.get(f'{_prefix}_total_count')) or 0
-                entry[f'_{_prefix}_total_amt']   = _safe_val(row.get(f'{_prefix}_total_amt'))   or 0
-                entry[f'_{_prefix}_net_amt']     = _safe_val(row.get(f'{_prefix}_net_amt'))     or 0
-                entry[f'{_prefix}_b2sc']         = _safe_val(row.get(f'{_prefix}_buyer_to_supplier_count'))
-                entry[f'{_prefix}_b2sa']         = _safe_val(row.get(f'{_prefix}_buyer_to_supplier_amt'))
-                entry[f'{_prefix}_b2sp']         = _safe_val(row.get(f'{_prefix}_buyer_to_supplier_amt_pct'))
-                entry[f'{_prefix}_s2bc']         = _safe_val(row.get(f'{_prefix}_supplier_to_buyer_count'))
-                entry[f'{_prefix}_s2ba']         = _safe_val(row.get(f'{_prefix}_supplier_to_buyer_amt'))
-                entry[f'{_prefix}_s2bp']         = _safe_val(row.get(f'{_prefix}_supplier_to_buyer_amt_pct'))
-
-            entry['if_pay'] = bool(row.get('in_payment', False))
-            entry['if_fa']  = bool(row.get('in_fast',    False))
-            entry['if_gi']  = bool(row.get('in_giro',    False))
+                _put_nz(f'_{_prefix}_ab_count',    _safe_val(row.get(f'{_prefix}_ab_count')))
+                _put_nz(f'_{_prefix}_ab_amt',      _safe_val(row.get(f'{_prefix}_ab_amt')))
+                _put_nz(f'_{_prefix}_ba_count',    _safe_val(row.get(f'{_prefix}_ba_count')))
+                _put_nz(f'_{_prefix}_ba_amt',      _safe_val(row.get(f'{_prefix}_ba_amt')))
+                _put_nz(f'_{_prefix}_total_count', _safe_val(row.get(f'{_prefix}_total_count')))
+                _put_nz(f'_{_prefix}_total_amt',   _safe_val(row.get(f'{_prefix}_total_amt')))
+                _put_nz(f'_{_prefix}_net_amt',     _safe_val(row.get(f'{_prefix}_net_amt')))
+                _put_nz(f'{_prefix}_b2sc',         _safe_val(row.get(f'{_prefix}_buyer_to_supplier_count')))
+                _put_nz(f'{_prefix}_b2sa',         _safe_val(row.get(f'{_prefix}_buyer_to_supplier_amt')))
+                _put_nz(f'{_prefix}_b2sp',         _safe_val(row.get(f'{_prefix}_buyer_to_supplier_amt_pct')))
+                _put_nz(f'{_prefix}_s2bc',         _safe_val(row.get(f'{_prefix}_supplier_to_buyer_count')))
+                _put_nz(f'{_prefix}_s2ba',         _safe_val(row.get(f'{_prefix}_supplier_to_buyer_amt')))
+                _put_nz(f'{_prefix}_s2bp',         _safe_val(row.get(f'{_prefix}_supplier_to_buyer_amt_pct')))
 
             for prod in _FITAS_PRODUCTS:
                 cnt = _safe_val(row.get(f'fitas_{prod}_count'))
@@ -406,13 +436,15 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
             _pair_keys_ordered.append(map_key)
 
         if _pair_keys_ordered:
-            gta_vals = [_safe_float(pair_rel_map[k]['gta']) for k in _pair_keys_ordered]
+            # gta may be absent on null-stripped entries (zero grand total) -- default to 0
+            gta_vals = [_safe_float(pair_rel_map[k].get('gta', 0)) for k in _pair_keys_ordered]
             widths   = _bin_widths(gta_vals)
             for i, k in enumerate(_pair_keys_ordered):
                 pair_rel_map[k]['wb'] = widths[i]
 
-        rsme_only_count = sum(1 for e in pair_rel_map.values() if e['ro'])
-        both_count      = sum(1 for e in pair_rel_map.values() if e['ib'])
+        # Diagnostic counts: ro/ib are absent on null-stripped entries -- use .get()
+        rsme_only_count = sum(1 for e in pair_rel_map.values() if e.get('ro'))
+        both_count      = sum(1 for e in pair_rel_map.values() if e.get('ib'))
         print(f"  pairRelationshipMap: {len(pair_rel_map):,} pairs built "
               f"({rsme_only_count:,} RSME-only, "
               f"{both_count:,} both-ways, "
@@ -444,21 +476,352 @@ def get_js_core(config, rsme_adjacency, rsme_degree_map, original_sizes_js,
           f"({(1 - comp_size/max(orig_size,1))*100:.1f}% reduction on key structures)")
     print(f"  pairRelationshipMap: {len(sj(pair_rel_map))/1024:.0f}KB")
 
+    # ── Step 6.5: Column-orient + dictionary-encode nodeMetaMap ───────────
+    # Convert {compId: {field: val}} into {ids:[...], fields:{field:{dict,idx}|{vals}}}.
+    # Each field's unique values become a small lookup table; rows store
+    # 1-byte indices into it. Repeated values like "SG"/"Y"/"N" / common MSIC
+    # codes appear once per dict instead of once per row. Gzip's 32KB window
+    # cannot reach across a 97k-node map, so we hoist the repetition into
+    # the format itself. JS rebuilds the row-oriented map at hydrate time
+    # so existing consumers (`nodeMetaMap[id].FIELD`) keep working.
+    def _column_encode_meta(meta_map, dict_threshold=0.5, sparse_null_threshold=0.7):
+        """
+        Three encodings per field, picked by data shape:
+          - sparse {dict, rows, sIdx} : when null fraction > sparse_null_threshold.
+                dict has only non-null uniques. rows lists row-indices that have
+                a non-null value. sIdx[k] is the dict index for rows[k].
+                Missing rows decode to undefined (== null for `meta.X != null`).
+          - dense  {dict, idx}        : when uniques < dict_threshold * n.
+                idx[i] = dict index for row i (null may be in dict).
+          - raw    {vals}             : fallback for high-cardinality cols.
+        """
+        if not meta_map:
+            return {'ids': [], 'fields': {}}
+        ids = list(meta_map.keys())
+        n   = len(ids)
+        field_set = set()
+        for row in meta_map.values():
+            field_set.update(row.keys())
+        fields_out = {}
+        for field in sorted(field_set):
+            col = [meta_map[uen].get(field) for uen in ids]
+            null_count = sum(1 for v in col if v is None)
+            null_frac  = null_count / n if n else 0
+
+            # Sparse path -- column is mostly null
+            if null_frac > sparse_null_threshold:
+                seen = {}
+                try:
+                    rows  = []
+                    sIdx  = []
+                    for i, v in enumerate(col):
+                        if v is None:
+                            continue
+                        if v not in seen:
+                            seen[v] = len(seen)
+                        rows.append(i)
+                        sIdx.append(seen[v])
+                except TypeError:
+                    fields_out[field] = {'vals': col}
+                    continue
+                fields_out[field] = {
+                    'dict': list(seen.keys()),
+                    'rows': rows,
+                    'sIdx': sIdx,
+                }
+                continue
+
+            # Dense / raw paths
+            seen = {}
+            try:
+                for v in col:
+                    if v not in seen:
+                        seen[v] = len(seen)
+            except TypeError:
+                fields_out[field] = {'vals': col}
+                continue
+            unique = list(seen.keys())
+            if len(unique) < dict_threshold * n:
+                fields_out[field] = {
+                    'dict': unique,
+                    'idx':  [seen[v] for v in col],
+                }
+            else:
+                fields_out[field] = {'vals': col}
+        return {'ids': ids, 'fields': fields_out}
+
+    node_meta_compact = _column_encode_meta(node_meta_js_c)
+    _row_size = len(sj(node_meta_js_c))
+    _col_size = len(sj(node_meta_compact))
+    _sparse_fields = sum(1 for f in node_meta_compact['fields'].values() if 'sIdx' in f)
+    _dense_fields  = sum(1 for f in node_meta_compact['fields'].values()
+                         if 'idx' in f and 'sIdx' not in f)
+    _vals_fields   = sum(1 for f in node_meta_compact['fields'].values() if 'vals' in f)
+    print(f"  nodeMetaMap column-encode: {_row_size/1024:.0f}KB -> {_col_size/1024:.0f}KB "
+          f"({(1 - _col_size/max(_row_size,1))*100:.1f}% reduction; "
+          f"{_dense_fields} dense, {_sparse_fields} sparse, {_vals_fields} raw)")
+
+    # ── Step 7: Bundle O(N) payloads into one gzipped blob ────────────────
+    # All per-node / per-edge data goes into a single gzip stream. The
+    # browser decompresses once at page load via DecompressionStream API
+    # (Chrome 80+, Firefox 113+, Safari 16.4+, Edge 80+). Single-stream
+    # gzip exploits cross-payload redundancy (repeated keys across maps)
+    # for better compression than independent streams.
+    _gz_payload = {
+        # _UtoI is derived from _ItoU at JS bootstrap (saves ~50% of UEN map).
+        '_ItoU'                   : id_to_uen,
+        'originalLabels'          : original_labels_js_c,
+        'originalSizes'           : original_sizes_js_c,
+        'nodeTypeMap'             : node_type_js_c,
+        'nodeMetaMapCompact'      : node_meta_compact,
+        'degreeMap'               : rsme_degree_map_js,
+        'adjacencyMap'            : rsme_adjacency_js,
+        'idNameLookup'            : id_name_lookup_js_c,
+        'companyList'             : company_list_js_c,
+        'pairRelationshipMap'     : pair_rel_map,
+        'consolTTNodeSummary'     : consol_tt_node_summary_js_c,
+        'consolTTNodeIds'         : consol_tt_node_ids_js,
+        'consolTTOutAdj'          : consol_tt_out_adj_js,
+        'consolTTInAdj'           : consol_tt_in_adj_js,
+        'consolTTDegreeMap'       : consol_tt_degree_js,
+        'consolTTSelfLoopIds'     : consol_tt_self_loop_js,
+        'fitasNodeSummary'        : fitas_node_summary_js_c,
+        'fitasNodeIds'            : fitas_node_ids_js,
+        'fitasOutAdj'             : fitas_out_adj_js,
+        'fitasInAdj'              : fitas_in_adj_js,
+        'fitasDegreeMap'          : fitas_degree_js,
+        'fitasSelfLoopIds'        : fitas_self_loop_js,
+        'aaPaperNodeIds'          : aa_paper_node_ids_js,
+        'aaPaperOutAdj'           : aa_paper_out_adj_js,
+        'aaPaperInAdj'            : aa_paper_in_adj_js,
+        'aaPaperDegreeMap'        : aa_paper_degree_js,
+        'aaPaperSelfLoopIds'      : aa_paper_self_loop_js,
+        'fastNodeSummary'         : fast_node_summary_js_c,
+        'fastNodeIds'             : fast_node_ids_js,
+        'fastOutAdj'              : fast_out_adj_js,
+        'fastInAdj'               : fast_in_adj_js,
+        'fastDegreeMap'           : fast_degree_js,
+        'fastSelfLoopIds'         : fast_self_loop_js,
+        'giroNodeSummary'         : giro_node_summary_js_c,
+        'giroNodeIds'             : giro_node_ids_js,
+        'giroOutAdj'              : giro_out_adj_js,
+        'giroInAdj'               : giro_in_adj_js,
+        'giroDegreeMap'           : giro_degree_js,
+        'giroSelfLoopIds'         : giro_self_loop_js,
+        'paymentNodeSummary'      : payment_node_summary_js_c,
+        'paymentNodeIds'          : payment_node_ids_js,
+        'paymentOutAdj'           : payment_out_adj_js,
+        'paymentInAdj'            : payment_in_adj_js,
+        'paymentDegreeMap'        : payment_degree_js,
+        'paymentSelfLoopIds'      : payment_self_loop_js,
+        'allTxnSelfLoopIds'       : all_txn_self_loop_js,
+        'paymentDirectedEdgesData': payment_directed_edges_js_c,
+        'paymentSelfLoopEdgesData': payment_selfloop_edges_js_c,
+        'fitasSelfLoopEdgesData'  : fitas_selfloop_edges_js_c,
+        'allTxnSelfLoopEdgesData' : all_txn_selfloop_edges_js_c,
+        'allTxnNodeSummary'       : all_txn_node_summary_js_c,
+        'rsmeNodeIds'             : rsme_node_ids_js,
+    }
+    _gz_json  = sj(_gz_payload)
+    _gz_bytes = gzip.compress(_gz_json.encode('utf-8'), compresslevel=6)
+    _gz_b64   = base64.b64encode(_gz_bytes).decode('ascii')
+    _gz_pct   = (1 - len(_gz_b64) / max(len(_gz_json), 1)) * 100
+    print(f"  gzipped payload bundle: {len(_gz_json)/1024/1024:.2f}MB JSON -> "
+          f"{len(_gz_bytes)/1024/1024:.2f}MB gz -> "
+          f"{len(_gz_b64)/1024/1024:.2f}MB base64 "
+          f"({_gz_pct:.1f}% reduction; {len(_gz_payload)} payloads)")
+
     # ── Generate JavaScript ────────────────────────────────────────────────
 
     return f"""
 // ══════════════════════════════════════════════════════════════════════════
-// UEN COMPRESSION MAPS + BOUNDARY FUNCTIONS
+// COMPRESSED PAYLOAD BUNDLE
+// All O(N) data structures (per-node maps, adjacency maps, edge lists, etc.)
+// are bundled into a single gzip stream and base64-encoded for embedding
+// inside this <script>. The browser decompresses once at page load via the
+// native DecompressionStream API (Chrome 80+, Firefox 113+, Safari 16.4+,
+// Edge 80+). This typically reduces the HTML 70-85% vs raw JSON embedding.
+// Empty placeholders for each payload are declared below so existing code
+// that reads them continues to compile; the actual data is hydrated inside
+// the __bootstrapReady promise before any UI init runs.
+// ══════════════════════════════════════════════════════════════════════════
+
+var __GZ_BLOB = "{_gz_b64}";
+
+async function _decompressJSON(b64) {{
+    if (typeof DecompressionStream === 'undefined') {{
+        throw new Error(
+            "DecompressionStream API not supported. " +
+            "Please use Chrome 80+, Edge 80+, Firefox 113+, or Safari 16.4+."
+        );
+    }}
+    var bytes = Uint8Array.from(atob(b64), function(c) {{ return c.charCodeAt(0); }});
+    var stream = new Response(
+        new Blob([bytes]).stream().pipeThrough(new DecompressionStream('gzip'))
+    );
+    return JSON.parse(await stream.text());
+}}
+
+// ── Empty placeholders for compressed payloads (hydrated below) ──────────
+// Plain dicts/arrays:
+var _UtoI = null, _ItoU = null;
+var originalLabels = null, originalSizes = null;
+var nodeTypeMap = null, nodeMetaMap = null;
+var degreeMap = null, adjacencyMap = null;
+var idNameLookup = null;
+// companyList default is an empty array (not null) so the search box
+// gracefully returns "no matches" if the user types before __bootstrapReady
+// resolves. The keydown-Enter handler at js_search.py:144 reads
+// `companyList.length` and `.find(...)` without awaiting bootstrap, which
+// would throw on a null reference.
+var companyList = [];
+var pairRelationshipMap = null;
+var consolTTNodeSummary = null, consolTTOutAdj = null, consolTTInAdj = null, consolTTDegreeMap = null;
+var fitasNodeSummary = null, fitasOutAdj = null, fitasInAdj = null, fitasDegreeMap = null;
+var aaPaperOutAdj = null, aaPaperInAdj = null, aaPaperDegreeMap = null;
+var fastNodeSummary = null, fastOutAdj = null, fastInAdj = null, fastDegreeMap = null;
+var giroNodeSummary = null, giroOutAdj = null, giroInAdj = null, giroDegreeMap = null;
+var paymentNodeSummary = null, paymentOutAdj = null, paymentInAdj = null, paymentDegreeMap = null;
+var paymentDirectedEdgesData = null, paymentSelfLoopEdgesData = null;
+var fitasSelfLoopEdgesData = null, allTxnSelfLoopEdgesData = null;
+var selfLoopEdgesData = null;
+var allTxnNodeSummary = null;
+
+// Sets (wrapped from arrays during hydration):
+var consolTTNodeIds = null, consolTTSelfLoopIds = null;
+var fitasNodeIds = null, fitasSelfLoopIds = null;
+var aaPaperNodeIds = null, aaPaperSelfLoopIds = null;
+var fastNodeIds = null, fastSelfLoopIds = null;
+var giroNodeIds = null, giroSelfLoopIds = null;
+var paymentNodeIds = null, paymentSelfLoopIds = null, allTxnSelfLoopIds = null;
+var rsmeNodeIds = null;
+
+// Bootstrap promise -- everything that depends on the big payloads must
+// `await __bootstrapReady` before reading them.
+var __bootstrapReady = (async function() {{
+    var _t0 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    var data = await _decompressJSON(__GZ_BLOB);
+
+    // Plain assignments
+    _ItoU                    = data._ItoU;
+    // Derive _UtoI from _ItoU instead of shipping both. _ItoU has ID-string
+    // keys ("1","2",...) and UEN-string values; we invert into UEN -> ID.
+    // Values stay as strings to match the build-time _UtoI shape (vis.js
+    // uses string node IDs in this project).
+    _UtoI = {{}};
+    for (var _idK in _ItoU) {{ _UtoI[_ItoU[_idK]] = _idK; }}
+    originalLabels           = data.originalLabels;
+    originalSizes            = data.originalSizes;
+    nodeTypeMap              = data.nodeTypeMap;
+    // Reconstruct row-oriented nodeMetaMap from column-oriented payload.
+    // Build-time encoder lives in js_core.py:_column_encode_meta. Three field
+    // shapes:
+    //   sparse: dict + rows + sIdx -- only rows listed in `rows` have a value;
+    //                                 missing rows leave the field unset
+    //   dense:  dict + idx         -- idx[i] indexes into dict for every row
+    //   raw:    vals               -- vals[i] is the value for row i
+    nodeMetaMap = (function(c) {{
+        if (!c || !c.ids) return {{}};
+        var ids = c.ids, fields = c.fields;
+        var fieldNames = Object.keys(fields);
+        var out = {{}};
+        // Pre-allocate empty row objects so sparse decoding can poke fields in
+        for (var i = 0; i < ids.length; i++) out[ids[i]] = {{}};
+        for (var j = 0; j < fieldNames.length; j++) {{
+            var fname = fieldNames[j];
+            var f     = fields[fname];
+            if (f.sIdx !== undefined) {{
+                // Sparse: only rows in f.rows get the field set
+                for (var k = 0; k < f.rows.length; k++) {{
+                    out[ids[f.rows[k]]][fname] = f.dict[f.sIdx[k]];
+                }}
+            }} else if (f.idx !== undefined) {{
+                // Dense dict-encoded
+                for (var i2 = 0; i2 < ids.length; i2++) {{
+                    out[ids[i2]][fname] = f.dict[f.idx[i2]];
+                }}
+            }} else {{
+                // Raw vals
+                for (var i3 = 0; i3 < ids.length; i3++) {{
+                    out[ids[i3]][fname] = f.vals[i3];
+                }}
+            }}
+        }}
+        return out;
+    }})(data.nodeMetaMapCompact);
+    degreeMap                = data.degreeMap;
+    adjacencyMap             = data.adjacencyMap;
+    idNameLookup             = data.idNameLookup;
+    companyList              = data.companyList;
+    pairRelationshipMap      = data.pairRelationshipMap;
+    consolTTNodeSummary      = data.consolTTNodeSummary;
+    consolTTOutAdj           = data.consolTTOutAdj;
+    consolTTInAdj            = data.consolTTInAdj;
+    consolTTDegreeMap        = data.consolTTDegreeMap;
+    fitasNodeSummary         = data.fitasNodeSummary;
+    fitasOutAdj              = data.fitasOutAdj;
+    fitasInAdj               = data.fitasInAdj;
+    fitasDegreeMap           = data.fitasDegreeMap;
+    aaPaperOutAdj            = data.aaPaperOutAdj;
+    aaPaperInAdj             = data.aaPaperInAdj;
+    aaPaperDegreeMap         = data.aaPaperDegreeMap;
+    fastNodeSummary          = data.fastNodeSummary;
+    fastOutAdj               = data.fastOutAdj;
+    fastInAdj                = data.fastInAdj;
+    fastDegreeMap            = data.fastDegreeMap;
+    giroNodeSummary          = data.giroNodeSummary;
+    giroOutAdj               = data.giroOutAdj;
+    giroInAdj                = data.giroInAdj;
+    giroDegreeMap            = data.giroDegreeMap;
+    paymentNodeSummary       = data.paymentNodeSummary;
+    paymentOutAdj            = data.paymentOutAdj;
+    paymentInAdj             = data.paymentInAdj;
+    paymentDegreeMap         = data.paymentDegreeMap;
+    paymentDirectedEdgesData = data.paymentDirectedEdgesData;
+    paymentSelfLoopEdgesData = data.paymentSelfLoopEdgesData;
+    fitasSelfLoopEdgesData   = data.fitasSelfLoopEdgesData;
+    allTxnSelfLoopEdgesData  = data.allTxnSelfLoopEdgesData;
+    selfLoopEdgesData        = data.allTxnSelfLoopEdgesData;
+    allTxnNodeSummary        = data.allTxnNodeSummary;
+
+    // Wrap arrays as Sets (Sets are not JSON-serialisable, so they go through
+    // the wire as arrays and get reconstructed here).
+    consolTTNodeIds          = new Set(data.consolTTNodeIds);
+    consolTTSelfLoopIds      = new Set(data.consolTTSelfLoopIds);
+    fitasNodeIds             = new Set(data.fitasNodeIds);
+    fitasSelfLoopIds         = new Set(data.fitasSelfLoopIds);
+    aaPaperNodeIds           = new Set(data.aaPaperNodeIds);
+    aaPaperSelfLoopIds       = new Set(data.aaPaperSelfLoopIds);
+    fastNodeIds              = new Set(data.fastNodeIds);
+    fastSelfLoopIds          = new Set(data.fastSelfLoopIds);
+    giroNodeIds              = new Set(data.giroNodeIds);
+    giroSelfLoopIds          = new Set(data.giroSelfLoopIds);
+    paymentNodeIds           = new Set(data.paymentNodeIds);
+    paymentSelfLoopIds       = new Set(data.paymentSelfLoopIds);
+    allTxnSelfLoopIds        = new Set(data.allTxnSelfLoopIds);
+    rsmeNodeIds              = new Set(data.rsmeNodeIds);
+
+    // Free the base64 string from memory now that everything is hydrated
+    __GZ_BLOB = null;
+
+    var _t1 = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
+    console.log("Decompressed " + Object.keys(data).length +
+                " payloads in " + (_t1 - _t0).toFixed(0) + "ms");
+}})();
+
+// ══════════════════════════════════════════════════════════════════════════
+// UEN COMPRESSION HELPERS  (operate on _UtoI/_ItoU after hydration)
 // _UtoI : UEN string -> string ID  e.g. "202012345C" -> "1"
 // _ItoU : string ID  -> UEN string e.g. "1" -> "202012345C"
 // _e(uid) : encode UEN string to string ID -- call once at renderSearch entry
 // _d(id)  : decode string ID to UEN string -- call only for display/external
 // ══════════════════════════════════════════════════════════════════════════
 
-var _UtoI = {sj(uen_to_id)};
-var _ItoU = {sj(id_to_uen)};
-
 function _e(uid) {{
+    if (_UtoI === null) {{
+        console.warn("_e(): called before bootstrap completed");
+        return uid;
+    }}
     var id = _UtoI[uid];
     if (id === undefined) {{
         console.warn("_e(): UEN not in compression map:", uid);
@@ -468,6 +831,10 @@ function _e(uid) {{
 }}
 
 function _d(id) {{
+    if (_ItoU === null) {{
+        console.warn("_d(): called before bootstrap completed");
+        return String(id);
+    }}
     var uid = _ItoU[String(id)];
     if (uid === undefined) {{
         console.warn("_d(): ID not in compression map:", id);
@@ -476,152 +843,22 @@ function _d(id) {{
     return uid;
 }}
 
-// ══════════════════════════════════════════════════════════════════════════
-// CORE DATA PAYLOADS (all keyed by compressed string IDs)
-// nodeMetaMap contains ONLY enabled=True fields from FIELD_CONFIG plus
-// SYSTEM_FIELDS required for graph logic. Disabled fields are excluded
-// from HTML entirely -- see config.get_graph_fields() + SYSTEM_FIELDS.
-// ══════════════════════════════════════════════════════════════════════════
-
-var originalLabels = {sj(original_labels_js_c)};
-var originalSizes  = {sj(original_sizes_js_c)};
-var nodeTypeMap    = {sj(node_type_js_c)};
-var nodeMetaMap    = {sj(node_meta_js_c)};
-var degreeMap      = {sj(rsme_degree_map_js)};
-var adjacencyMap   = {sj(rsme_adjacency_js)};
-var idNameLookup   = {sj(id_name_lookup_js_c)};
-
-var companyList = {sj(company_list_js_c)};
-
-// ══════════════════════════════════════════════════════════════════════════
-// PAIR RELATIONSHIP MAP  (single source of truth for all edge data)
-// Key: numerically sorted compressed IDs joined by "_"
-//   e.g. IDs "3" and "17" -> "3_17"
-// Resolve from any edge: [parseInt(e.fr), parseInt(e.to)].sort((a,b)=>a-b).join('_')
-//
-// vis.js injection fields:
-//   fr  = from compressed ID (directional)
-//   to  = to compressed ID   (directional)
-//   ro  = rsme_only -> dashed line, no arrow
-//   wb  = edge width (log1p binned from gta, 1.0-8.0)
-//   ib  = is_both   -> arrows at both ends
-//   id  = is_directed (false = rsme_only undirected)
-//
-// Filter flags:
-//   ir=in_rsme  if=in_fitas  ia=in_aa  it=in_tt
-//
-// Side panel fields:
-//   ps=priority_source  bu/su/cu/cou = buyer/supplier/customer/counterparty (cids)
-//   tb2sc/tb2sa/tb2sp = tt buyer->supplier count/amt/pct
-//   s2bc/s2ba/s2bp    = tt supplier->buyer count/amt/pct
-//   ttc/tta=tt total count/amt  fta=fitas total amt  gta=grand total amt
-//   f_{{prod}}_c/a = fitas product count/amt (sparse -- only present if non-zero)
-//
-// Data fields (export adjacency + side panel):
-//   _rsme_ab/_rsme_ba/_aa_ab/_aa_ba
-//   _fitas_ab_count/_fitas_ab_amt/_fitas_ba_count/_fitas_ba_amt
-//   _tt_ab_count/_tt_ab_amt/_tt_ba_count/_tt_ba_amt/_tt_total_count/_tt_net_amt
-// ══════════════════════════════════════════════════════════════════════════
-
-var pairRelationshipMap = {sj(pair_rel_map)};
-
-// Self-loop edges -- Payment combined (TT + FAST + GIRO union per UEN)
-var selfLoopEdgesData = {sj(all_txn_selfloop_edges_js_c)};
-// var selfLoopEdgesData = {sj(selfloop_edges_js_c)};   // legacy TT-only -- replaced by allTxnSelfLoopEdgesData
-
+// pairRelationshipMap accessor (waits implicitly via callers awaiting __bootstrapReady)
 function _getPairRel(idA, idB) {{
     var key = [parseInt(idA), parseInt(idB)].sort(function(a,b){{return a-b;}}).join('_');
-    return pairRelationshipMap[key] || null;
+    return pairRelationshipMap ? (pairRelationshipMap[key] || null) : null;
 }}
 
 // ══════════════════════════════════════════════════════════════════════════
-// CONSOLIDATED TT (compressed string IDs)
+// METRIC RANGES (small, kept as raw JSON -- no compression benefit)
 // ══════════════════════════════════════════════════════════════════════════
 
-var consolTTNodeSummary  = {sj(consol_tt_node_summary_js_c)};
 var consolTTMetricRanges = {sj(consol_tt_metric_ranges)};
-var consolTTNodeIds      = new Set({sj(consol_tt_node_ids_js)});
-var consolTTOutAdj       = {sj(consol_tt_out_adj_js)};
-var consolTTInAdj        = {sj(consol_tt_in_adj_js)};
-var consolTTDegreeMap    = {sj(consol_tt_degree_js)};
-var consolTTSelfLoopIds  = new Set({sj(consol_tt_self_loop_js)});
-
-// ══════════════════════════════════════════════════════════════════════════
-// FITAS (compressed string IDs)
-// ══════════════════════════════════════════════════════════════════════════
-
-var fitasNodeSummary  = {sj(fitas_node_summary_js_c)};
-var fitasMetricRanges = {sj(fitas_metric_ranges)};
-var fitasNodeIds      = new Set({sj(fitas_node_ids_js)});
-var fitasOutAdj       = {sj(fitas_out_adj_js)};
-var fitasInAdj        = {sj(fitas_in_adj_js)};
-var fitasDegreeMap    = {sj(fitas_degree_js)};
-var fitasSelfLoopIds  = new Set({sj(fitas_self_loop_js)});
-
-// ══════════════════════════════════════════════════════════════════════════
-// AA PAPER (compressed string IDs)
-// ══════════════════════════════════════════════════════════════════════════
-
-var aaPaperNodeIds     = new Set({sj(aa_paper_node_ids_js)});
-var aaPaperOutAdj      = {sj(aa_paper_out_adj_js)};
-var aaPaperInAdj       = {sj(aa_paper_in_adj_js)};
-var aaPaperDegreeMap   = {sj(aa_paper_degree_js)};
-var aaPaperSelfLoopIds = new Set({sj(aa_paper_self_loop_js)});
-
-// ══════════════════════════════════════════════════════════════════════════
-// FAST (compressed string IDs)
-// ══════════════════════════════════════════════════════════════════════════
-
-var fastNodeSummary  = {sj(fast_node_summary_js_c)};
-var fastMetricRanges = {sj(fast_metric_ranges)};
-var fastNodeIds      = new Set({sj(fast_node_ids_js)});
-var fastOutAdj       = {sj(fast_out_adj_js)};
-var fastInAdj        = {sj(fast_in_adj_js)};
-var fastDegreeMap    = {sj(fast_degree_js)};
-var fastSelfLoopIds  = new Set({sj(fast_self_loop_js)});
-
-// ══════════════════════════════════════════════════════════════════════════
-// GIRO (compressed string IDs)
-// ══════════════════════════════════════════════════════════════════════════
-
-var giroNodeSummary  = {sj(giro_node_summary_js_c)};
-var giroMetricRanges = {sj(giro_metric_ranges)};
-var giroNodeIds      = new Set({sj(giro_node_ids_js)});
-var giroOutAdj       = {sj(giro_out_adj_js)};
-var giroInAdj        = {sj(giro_in_adj_js)};
-var giroDegreeMap    = {sj(giro_degree_js)};
-var giroSelfLoopIds  = new Set({sj(giro_self_loop_js)});
-
-// ══════════════════════════════════════════════════════════════════════════
-// PAYMENT (TT + FAST + GIRO union)
-// ══════════════════════════════════════════════════════════════════════════
-
-var paymentNodeSummary       = {sj(payment_node_summary_js_c)};
-var paymentMetricRanges      = {sj(payment_metric_ranges)};
-var paymentNodeIds           = new Set({sj(payment_node_ids_js)});
-var paymentOutAdj            = {sj(payment_out_adj_js)};
-var paymentInAdj             = {sj(payment_in_adj_js)};
-var paymentDegreeMap         = {sj(payment_degree_js)};
-var paymentSelfLoopIds       = new Set({sj(payment_self_loop_js)});
-var allTxnSelfLoopIds        = new Set({sj(all_txn_self_loop_js)});
-var paymentDirectedEdgesData = {sj(payment_directed_edges_js_c)};
-var paymentSelfLoopEdgesData = {sj(payment_selfloop_edges_js_c)};
-var fitasSelfLoopEdgesData   = {sj(fitas_selfloop_edges_js_c)};
-var allTxnSelfLoopEdgesData  = {sj(all_txn_selfloop_edges_js_c)};
-
-// ══════════════════════════════════════════════════════════════════════════
-// ALL TRANSACTIONS (FITAS + Payment) -- summary + ranges only
-// ══════════════════════════════════════════════════════════════════════════
-
-var allTxnNodeSummary  = {sj(all_txn_node_summary_js_c)};
-var allTxnMetricRanges = {sj(all_txn_metric_ranges)};
-
-// ══════════════════════════════════════════════════════════════════════════
-// RSME (compressed string IDs)
-// rsmeNodeIds built from rsme adjacency keys only -- not all nodes.
-// ══════════════════════════════════════════════════════════════════════════
-
-var rsmeNodeIds = new Set({sj(rsme_node_ids_js)});
+var fitasMetricRanges    = {sj(fitas_metric_ranges)};
+var fastMetricRanges     = {sj(fast_metric_ranges)};
+var giroMetricRanges     = {sj(giro_metric_ranges)};
+var paymentMetricRanges  = {sj(payment_metric_ranges)};
+var allTxnMetricRanges   = {sj(all_txn_metric_ranges)};
 
 // ══════════════════════════════════════════════════════════════════════════
 // CONFIGURATION

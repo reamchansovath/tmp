@@ -7,7 +7,7 @@
 import pandas as pd
 from .base_source import BaseSource
 
-_INVALID_IDS = {'', 'nan', 'none', 'None', 'NaN', 'NAN'}
+_INVALID_IDS = BaseSource.INVALID_IDS  # local alias; canonical set lives on BaseSource
 
 
 class ConsolTTSource(BaseSource):
@@ -136,8 +136,15 @@ class ConsolTTSource(BaseSource):
         One row per ORD_ID_CODE -> BENE_ID_CODE pair.
         txn_amt = total SGD sent in that direction across all transactions.
         """
+        # *** fix | coerce SGD_TRN_AMT to numeric before groupby.sum().
+        # Without this, an object-dtype column with mixed strings/numbers
+        # would silently produce NaN totals or raise on aggregation.
+        df = self.combined_df.copy()
+        df['SGD_TRN_AMT'] = pd.to_numeric(
+            df.get('SGD_TRN_AMT'), errors='coerce'
+        )
         self.edges_df = (
-            self.combined_df
+            df
             .dropna(subset=['ORD_ID_CODE', 'BENE_ID_CODE'])
             .loc[lambda x:
                 ~x['ORD_ID_CODE'].astype(str).str.strip().isin(_INVALID_IDS) &
@@ -178,10 +185,14 @@ class ConsolTTSource(BaseSource):
                 self.out_adj.setdefault(src, []).append(tgt)
                 self.in_adj.setdefault(tgt, []).append(src)
 
+        # *** fix | unique-counterparty count: |out_adj ∪ in_adj|.
+        # Was: len(out_adj) + len(in_adj) -- which (a) failed to dedupe parallel
+        # edges within a direction (5 TT txns to one counterparty counted as 5),
+        # and (b) double-counted bidirectional pairs. Same semantics as
+        # _tt_deg in Recipe_1_Pipeline.py.
         for nid in self.active_uens:
-            self.degree_map[nid] = (
-                len(self.out_adj.get(nid, [])) +
-                len(self.in_adj.get(nid, []))
+            self.degree_map[nid] = len(
+                set(self.out_adj.get(nid, [])) | set(self.in_adj.get(nid, []))
             )
 
     def get_nodes(self) -> pd.DataFrame:

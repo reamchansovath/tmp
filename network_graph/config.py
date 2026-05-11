@@ -167,10 +167,10 @@ class NetworkGraphConfig:
         'CASA'        : {'label': 'Current Account',        'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
         'FD'          : {'label': 'TD',                     'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
         'STRCTD'      : {'label': 'Structured TD',          'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
-        'DEP_BALANCES': {'label': 'Total Deposit Balances', 'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
+        'DEP_BALANCES': {'label': 'Total Deposit Balances', 'enabled': False, 'trade_only': False, 'cpty': False, 'section': 'facilities'},  # excluded from HTML: side panel computes CASA+FD+STRCTD client-side; Recipe 3 has its own column list
         'TR_LN'       : {'label': 'Trade Loan',             'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
         'NONTR_LN'    : {'label': 'Non-Trade Loan',         'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
-        'LN_BALANCES' : {'label': 'Total Loan Balances',    'enabled': True, 'trade_only': False, 'cpty': False, 'section': 'facilities'},
+        'LN_BALANCES' : {'label': 'Total Loan Balances',    'enabled': False, 'trade_only': False, 'cpty': False, 'section': 'facilities'},  # excluded from HTML: side panel computes TR_LN+NONTR_LN client-side; Recipe 3 has its own column list
 
         # ── credit status ────────────────────────────────────────────────────
         'credit_status'        : {'label': 'Credit Status',               'enabled': True,  'trade_only': False, 'cpty': False, 'section': 'creditstatus'},
@@ -307,6 +307,146 @@ class NetworkGraphConfig:
     @classmethod
     def get_graph_fields(cls) -> set:
         return {k for k, v in cls.FIELD_CONFIG.items() if v.get('enabled', True)}
+
+    # ═════════════════════════════════════════════════════════════════════════
+    # EXCEL HEADER OVERRIDES  (Tier 1 single-source-of-truth)
+    # ─────────────────────────────────────────────────────────────────────────
+    # FIELD_CONFIG[k]['label'] is the *HTML side-panel* label. The Excel
+    # screener (Recipe 3) historically had its own NODE_RENAME with slightly
+    # different headers (e.g. trailing "(SGD)" suffix, "ACRA"/"MFI"/"CIP"
+    # prefixes). Override here once -- get_excel_rename() falls back to the
+    # HTML label when an entry isn't listed.
+    #
+    # Per-field `enabled_excel` (defaults to True) controls whether a field
+    # ships to Excel at all -- set on the FIELD_CONFIG entry itself.
+    # ═════════════════════════════════════════════════════════════════════════
+    EXCEL_LABEL_OVERRIDES = {
+        # ── internal ────────────────────────────────────────────────────────
+        'FINAL_CLASSIFICATION'                   : 'Customer Segment',
+        # ── overview ────────────────────────────────────────────────────────
+        'entity_status_description'              : 'Entity Status',
+        'EMIS Fiscal Year'                       : 'EMIS Fiscal Year',
+        # ── facilities: trade ───────────────────────────────────────────────
+        'TF_LCY_AVAIL_LMT'                       : 'Trade Available Limit (SGD)',
+        'TF_LCY_AUTH_LMT'                        : 'Trade Authorised Limit (SGD)',
+        'TF_LCY_TOT_OS'                          : 'Trade On-Balance Sheet Outstanding (SGD)',
+        'TF_LCY_OBS_OS'                          : 'Trade Off-Balance Sheet Outstanding (SGD)',
+        # ── facilities: balance sheet ───────────────────────────────────────
+        'CASA'                                   : 'Current Account (SGD)',
+        'FD'                                     : 'TD (SGD)',
+        'STRCTD'                                 : 'Structured TD (SGD)',
+        'DEP_BALANCES'                           : 'Total Deposit Balances (SGD)',
+        'TR_LN'                                  : 'Trade Loan (SGD)',
+        'NONTR_LN'                               : 'Non-Trade Loan (SGD)',
+        'LN_BALANCES'                            : 'Total Loan Balances (SGD)',
+        # ── credit status ───────────────────────────────────────────────────
+        'is_watchlist'                           : 'Is Watchlist',
+        'is_special_mention'                     : 'Is Special Mention (SMA)',
+        'is_npl'                                 : 'Is NPL',
+        # ── ACRA financials (prefix + SGD suffix) ───────────────────────────
+        'FIN_FIN_YR_END_CY'                      : 'ACRA Financial Year End',
+        'FIN_SALES_CY'                           : 'ACRA Sales Revenue (SGD)',
+        'FIN_PROF_BEF_TAX_CY'                    : 'ACRA Profit Before Tax (SGD)',
+        'FIN_CASH_BANK_BAL_CY'                   : 'ACRA Cash & Bank Balance (SGD)',
+        'FIN_TRADE_CRED_CY'                      : 'ACRA Trade Creditors (SGD)',
+        'FIN_TRADE_DEPT_CY'                      : 'ACRA Trade Debtors (SGD)',
+        # ── ACRA charges (slight wording diff) ──────────────────────────────
+        'CHARGE_ALLMONIESOWING_Y_COUNT'          : 'Charges - All Monies Owing (Y Count)',
+        'CHARGE_ALLMONIESOWING_N_COUNT'          : 'Charges - All Monies Owing (N Count)',
+        # ── EMIS percentages (prefix only) ──────────────────────────────────
+        'EMIS Return on Assets / ROA (%)'        : 'EMIS ROA (%)',
+        'EMIS Return on Equity / ROE (%)'        : 'EMIS ROE (%)',
+        'EMIS Audited'                           : 'EMIS Audited',
+        'EMIS Source'                            : 'EMIS Source',
+        # ── MFI financials (MFI prefix + SGD/Months suffix) ─────────────────
+        'MFI_END_DTE'                            : 'MFI Financial Year End',
+        'MFI_STATEMENT_TYP'                      : 'MFI Statement Type',
+        'MFI_AUDITOR_NAME'                       : 'MFI Auditor',
+        'MFI_QUALIFIED'                          : 'MFI Qualified Opinion',
+        'MFI_SEG_DESC'                           : 'MFI Segment',
+        'MFI_MODEL_NAME'                         : 'MFI Model Name',
+        'MFI_TARGET_CURCY_CODE'                  : 'MFI Target Currency',
+        'MFI_BASE_CURCY_CODE'                    : 'MFI Base Currency',
+        'MFI_LENGTH_IN_MTH'                      : 'MFI Period Length (Months)',
+        'MFI_STATEMENT_STS'                      : 'MFI Statement Status',
+        'MFI_PROC_DTE'                           : 'MFI Processing Date',
+        'MFI_SALES'                              : 'MFI Sales Revenue (SGD)',
+        'MFI_COGS'                               : 'MFI COGS (SGD)',
+        'MFI_GROSS_PNL'                          : 'MFI Gross Operating P&L (SGD)',
+        'MFI_PRETAX_PNL_BEFORE_INT'              : 'MFI Pre-Tax P&L Before Int (SGD)',
+        'MFI_PNL_BEFORE_TAX'                     : 'MFI Profit Before Tax (SGD)',
+        'MFI_PNL_AFT_TAX'                        : 'MFI Profit After Tax (SGD)',
+        'MFI_EBITDA'                             : 'MFI EBITDA (SGD)',
+        'MFI_TOT_AST'                            : 'MFI Total Assets (SGD)',
+        'MFI_CURR_AST'                           : 'MFI Current Assets (SGD)',
+        'MFI_NON_CURR_AST'                       : 'MFI Non-Current Assets (SGD)',
+        'MFI_TOT_LBLTY'                          : 'MFI Total Liabilities (SGD)',
+        'MFI_CURR_LBLTY'                         : 'MFI Current Liabilities (SGD)',
+        'MFI_NON_CURR_LBLTY'                     : 'MFI Non-Current Liabilities (SGD)',
+        'MFI_TOT_EQUITY'                         : 'MFI Total Equity (SGD)',
+        'MFI_ST_DEBT'                            : 'MFI Short-Term Debt (SGD)',
+        'MFI_LT_DEBT'                            : 'MFI Long-Term Debt (SGD)',
+        'MFI_TOTAL_DEBT'                         : 'MFI Total Debt (SGD)',
+        'MFI_DEBT_SERVICE'                       : 'MFI Debt Service (SGD)',
+        'MFI_TANGIBLE_NET_WORTH'                 : 'MFI Tangible Net Worth (SGD)',
+        'MFI_ADJ_TNW'                            : 'MFI Adjusted TNW (SGD)',
+        'MFI_DCSR'                               : 'MFI DSCR',
+        'MFI_GEARING'                            : 'MFI Gearing Ratio',
+        # ── CIP collaterals (CIP prefix + SGD for amounts) ──────────────────
+        'CIP_FAC_LIMIT_SGD'                      : 'CIP Facility Limit (SGD)',
+        'CIP_LOAN_BALANCE_SGD'                   : 'CIP Loan Balance (SGD)',
+        'CIP_NPL_BALANCE_SGD'                    : 'CIP NPL Balance (SGD)',
+        'CIP_SEC_AMT'                            : 'CIP Security Amount (SGD)',
+        'CIP_SEC_EMV'                            : 'CIP Estimated Market Value (SGD)',
+        'CIP_SEC_FSV'                            : 'CIP Forced Sale Value (SGD)',
+        'CIP_SEC_FIV'                            : 'CIP Fire Insurance Value (SGD)',
+        'CIP_N_PROPERTIES'                       : 'CIP No. Properties',
+        'CIP_N_ACC_TOTAL'                        : 'CIP Total Accounts',
+        'CIP_N_ACC_OPEN'                         : 'CIP Open Accounts',
+        'CIP_N_ACC_CLOSED'                       : 'CIP Closed Accounts',
+        'CIP_EARLIEST_AC_OPN_DTE'                : 'CIP Earliest Account Open Date',
+        'CIP_LATEST_AC_OPN_DTE'                  : 'CIP Latest Account Open Date',
+        'CIP_LATEST_DEFAULT_DTE'                 : 'CIP Latest Default Date',
+        'EARLIEST_OPEN_AC_OPN_DTE'               : 'CIP Earliest Open Account Date',
+        'LATEST_OPEN_AC_OPN_DTE'                 : 'CIP Latest Open Account Date',
+        'EARLIEST_CLOSED_AC_OPN_DTE'             : 'CIP Earliest Closed Account Date',
+        'LATEST_AC_CLS_DTE'                      : 'CIP Latest Account Close Date',
+        'CIP_JTC_FLAG'                           : 'CIP JTC Properties Count',
+        'CIP_PBD_OCCP_TYPE_OWNOCCPD_COUNT'       : 'CIP Owner Occupied Properties',
+        'CIP_PBD_OCCP_TYPE_TENANTED_COUNT'       : 'CIP Tenanted Properties',
+        'CIP_PBD_OCCP_TYPE_BIZOPS_COUNT'         : 'CIP Business Ops Properties',
+        'CIP_PBD_OCCP_TYPE_VACANT_COUNT'         : 'CIP Vacant Properties',
+        'CIP_FAC_PROC_DTE'                       : 'CIP Facility Processing Date',
+        'CIP_BALANCE_PROC_DTE'                   : 'CIP Balance Processing Date',
+    }
+
+    @classmethod
+    def field_excel_label(cls, key: str) -> str:
+        """Return the Excel header for a FIELD_CONFIG key.
+        Falls back to FIELD_CONFIG[k]['label'] when no override is set."""
+        cfg = cls.FIELD_CONFIG.get(key)
+        if cfg is None:
+            return key
+        return cls.EXCEL_LABEL_OVERRIDES.get(key, cfg['label'])
+
+    @classmethod
+    def get_excel_rename(cls) -> dict:
+        """{raw_col: excel_header} for every FIELD_CONFIG entry where
+        enabled_excel != False (default True). Used by Recipe 3 to build
+        NODE_RENAME — merge with per-source flow-metric renames there."""
+        return {
+            k: cls.field_excel_label(k)
+            for k, v in cls.FIELD_CONFIG.items()
+            if v.get('enabled_excel', True)
+        }
+
+    @classmethod
+    def get_excel_field_keys(cls) -> list:
+        """Ordered list of FIELD_CONFIG keys with enabled_excel != False."""
+        return [
+            k for k, v in cls.FIELD_CONFIG.items()
+            if v.get('enabled_excel', True)
+        ]
 
     # ═════════════════════════════════════════════════════════════════════════
     # SYSTEM FIELDS

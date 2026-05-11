@@ -69,20 +69,26 @@ var BADGE_FIELDS = {
 };
 
 // Per-source self-loop lookup maps (keyed by compressed UEN id)
-// Built once at load time -- O(1) lookup for FITAS/Payment/All Txn summary
-// accordions, which need separate self-transfer counts per source.
+// O(1) lookup for FITAS / Payment / All Txn summary accordions which need
+// separate self-transfer counts per source. The arrays they're built from
+// (paymentSelfLoopEdgesData / fitasSelfLoopEdgesData / allTxnSelfLoopEdgesData)
+// arrive via __bootstrapReady (gzip decompress), so we initialise these maps
+// empty here and populate them once decompression completes. Side-panel
+// code reads _xSelfLoopMap[id] safely against {} until then.
 var _paymentSelfLoopMap = {};
-if (typeof paymentSelfLoopEdgesData !== "undefined") {
-    paymentSelfLoopEdgesData.forEach(function(e) { _paymentSelfLoopMap[e.uen] = e; });
-}
-var _fitasSelfLoopMap = {};
-if (typeof fitasSelfLoopEdgesData !== "undefined") {
-    fitasSelfLoopEdgesData.forEach(function(e) { _fitasSelfLoopMap[e.uen] = e; });
-}
-var _allTxnSelfLoopMap = {};
-if (typeof allTxnSelfLoopEdgesData !== "undefined") {
-    allTxnSelfLoopEdgesData.forEach(function(e) { _allTxnSelfLoopMap[e.uen] = e; });
-}
+var _fitasSelfLoopMap   = {};
+var _allTxnSelfLoopMap  = {};
+__bootstrapReady.then(function() {
+    if (paymentSelfLoopEdgesData) {
+        paymentSelfLoopEdgesData.forEach(function(e) { _paymentSelfLoopMap[e.uen] = e; });
+    }
+    if (fitasSelfLoopEdgesData) {
+        fitasSelfLoopEdgesData.forEach(function(e) { _fitasSelfLoopMap[e.uen] = e; });
+    }
+    if (allTxnSelfLoopEdgesData) {
+        allTxnSelfLoopEdgesData.forEach(function(e) { _allTxnSelfLoopMap[e.uen] = e; });
+    }
+});
 
 function makeSegmentBadge(meta) {
     if (!meta || parseInt(meta.IS_MAYBANK_CUSTOMER) !== 1) return "";
