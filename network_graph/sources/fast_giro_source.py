@@ -121,8 +121,8 @@ class FastGiroSource(BaseSource):
         Build per-pair directed edges with reversal handling.
 
         Step A -- assign SOURCE/TARGET based on DR/CR direction.
-            DR_CR_IND == 'DR' (debit to ORD account):  ORD = sender, BENE = receiver. No swap.
-            DR_CR_IND == 'CR' (credit to ORD account): swap -- BENE = sender, ORD = receiver.
+            DR_CR_IND == 'D' (debit to ORD account):  ORD = sender, BENE = receiver. No swap.
+            DR_CR_IND == 'C' (credit to ORD account): swap -- BENE = sender, ORD = receiver.
             Other / missing: keep ORD->BENE.
         Step B -- negate LCY_TRN_AMT for REV_IND == 'Y' rows so reversals cancel.
         Step C -- groupby (SOURCE_UEN, TARGET_UEN), sum negated LCY_TRN_AMT, count TRN_ID.
@@ -131,16 +131,15 @@ class FastGiroSource(BaseSource):
         """
         df = self.raw_df.copy()
 
-        # *** fix | DR_CR_IND must be {'CR','DR'} -- garbage/empty values
-        # used to silently default to ORD->BENE direction, which would
-        # mis-pair with reversal rows where the original was a CR. Now we
-        # drop rows whose DR_CR_IND can't be interpreted (only when the
-        # column exists; if it's absent we still fall back to ORD->BENE
-        # for the whole frame).
+        # *** fix | DR_CR_IND values in the harmonised feather are single
+        # letters 'C' / 'D' (not the spelled-out 'CR' / 'DR'). Rows with any
+        # other value are dropped so an unexpected code can't silently
+        # default to ORD->BENE direction (which would mis-pair with a
+        # reversal row whose original was a credit).
         if 'DR_CR_IND' in df.columns:
             ind = df['DR_CR_IND'].astype(str).str.strip().str.upper()
-            cr_mask    = (ind == 'CR')
-            known_mask = ind.isin(['CR', 'DR'])
+            cr_mask    = (ind == 'C')
+            known_mask = ind.isin(['C', 'D'])
         else:
             cr_mask    = pd.Series(False, index=df.index)
             known_mask = pd.Series(True,  index=df.index)
